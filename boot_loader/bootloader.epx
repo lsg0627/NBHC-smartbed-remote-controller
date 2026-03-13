@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<EISCStudioProject version="3.00">
+    <Compile BUILDTYPE="executable" CC="ae32000-elf-gcc" AS="ae32000-elf-as" LD="ae32000-elf-ld" AR="ae32000-elf-ar" OBJDUMP="ae32000-elf-objdump" OBJCOPY="ae32000-elf-objcopy" CFLAGS="-w" LDFLAGS="-Wall -nostartfiles -lgcc -lc -lm" ASFLAGS="" ARFLAGS="-rcv" DISFLAGS="-dzShxl" OUTPUTDIR="output/" OBJDIR="obj/" DebugInfo="1" Wall="1" OPTLEVEL="2" OUTPUTFILE="bootloader.elf" />
+    <Directory>
+        <INCDIR Name="../../include" />
+    </Directory>
+    <Files>
+        <Source Name="../../startup/adStarInit.c" />
+        <Source Name="../../startup/startup_adstar.s" />
+        <Source Name="main.c" />
+        <Source Name="rsp_main.c" />
+        <Source Name="../../etc_driver/misc.c" />
+        <Source Name="mass_stor.c" />
+        <Source Name="../drive/smart_bed_remocon.c" />
+        <Source Name="../drive/lcd.c" />
+        <Header Name="../../include/adstar.h" />
+        <Header Name="../../include/typedef.h" />
+        <Header Name="../../include/stk_board.h" />
+        <Header Name="../drive/smart_bed_remocon.h" />
+        <Header Name="../drive/lcd.h" />
+        <LinkScript Name="adstar-bootloader.ld" />
+        <NoCompile Name="output/bootloader.elf.dis" />
+        <Library Name="../../lib/libadStar.a" />
+        <Library Name="../../lib/libjpeg.a" />
+        <Library Name="../../lib/libmad.a" />
+        <Library Name="../../lib/libpng.a" />
+        <Library Name="../../lib/libz.a" />
+        <LastOpenFile Name="main.c" Line="113" />
+    </Files>
+    <Event cmd="" desc="" enable="true" />
+    <Debug>
+        <Argument Name="" />
+        <UseGlobalOption Name="true" />
+    </Debug>
+</EISCStudioProject>

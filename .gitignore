@@ -1,0 +1,17 @@
+# Build artifacts
+*.o
+*.bin
+*.elf
+*.hex
+*.map
+*.lst
+
+# Object/output directories
+**/obj/
+**/output/
+
+# Flash image
+flash_image/
+
+# WebDAV metadata
+._DAV/

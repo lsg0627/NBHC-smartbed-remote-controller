@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<EISCStudioProject version="3.00">
+    <Compile BUILDTYPE="executable" CC="ae32000-elf-gcc" AS="ae32000-elf-as" LD="ae32000-elf-ld" AR="ae32000-elf-ar" OBJDUMP="ae32000-elf-objdump" OBJCOPY="ae32000-elf-objcopy" CFLAGS="-fno-strength-reduce" LDFLAGS="-Wall -nostartfiles -lgcc -lc -lm" ASFLAGS="" ARFLAGS="-rcv" DISFLAGS="-dzShxl" OUTPUTDIR="output/" OBJDIR="obj/" DebugInfo="1" Wall="1" OPTLEVEL="2" OUTPUTFILE="smart_bed_app.elf" />
+    <Directory>
+        <INCDIR Name="../../include" />
+    </Directory>
+    <Files>
+        <Source Name="../../startup/adStarInit.c" />
+        <Source Name="main.c" />
+        <Source Name="../../etc_driver/misc.c" />
+        <Source Name="../../startup/startup_adstar.s" />
+        <Source Name="../drive/smart_bed_remocon.c" />
+        <Source Name="../drive/lcd.c" />
+        <Source Name="../drive/key.c" />
+        <Source Name="../code/user_task.c" />
+        <Source Name="../code/ui_globals.c" />
+        <Source Name="../drive/protocol.c" />
+        <Header Name="../../include/adStar.h" />
+        <Header Name="../../include/typedef.h" />
+        <Header Name="../../include/adstar/cacheutil.h" />
+        <Header Name="../../include/adstar/crtc.h" />
+        <Header Name="../../include/adstar/dma.h" />
+        <Header Name="../../include/adstar/gpio.h" />
+        <Header Name="../../include/adstar/interrupt.h" />
+        <Header Name="../../include/adstar/nandctrl.h" />
+        <Header Name="../../include/adstar/pmu.h" />
+        <Header Name="../../include/adstar/sdcard.h" />
+        <Header Name="../../include/adstar/soundmixer.h" />
+        <Header Name="../../include/adstar/timer.h" />
+        <Header Name="../../include/adstar/twi.h" />
+        <Header Name="../../include/adstar/uart.h" />
+        <Header Name="../../include/adstar/usb.h" />
+        <Header Name="../../include/etc_driver/misc.h" />
+        <Header Name="main.h" />
+        <Header Name="../../include/egl/surface.h" />
+        <Header Name="../drive/smart_bed_remocon.h" />
+        <Header Name="../../include/adstar/spi.h" />
+        <Header Name="../drive/key.h" />
+        <Header Name="../drive/lcd.h" />
+        <Header Name="../../include/egl/image/loadsurf.h" />
+        <Header Name="../../include/egl/egl_window.h" />
+        <Header Name="../../include/egl/egl_typedef.h" />
+        <Header Name="../include/user_task.h" />
+        <Header Name="../include/ui_globals.h" />
+        <Header Name="../drive/protocol.h" />
+        <Header Name="../../include/egl/util/fixed_sincos.h" />
+        <Header Name="../../include/egl/primitives/colors.h" />
+        <Header Name="../../include/egl/primitives/draw_arc.h" />
+        <Header Name="../../include/egl/primitives/draw_legacy.h" />
+        <Header Name="../../include/egl/primitives/draw_line.h" />
+        <Header Name="../../include/egl/primitives/draw_poly.h" />
+        <Header Name="../../include/egl/primitives/draw_rect.h" />
+        <Header Name="../../include/egl/primitives/draw_roundrect.h" />
+        <Header Name="../../include/egl/primitives/draw_thickline.h" />
+        <LinkScript Name="../../startup/adstar_ram.ld" />
+        <NoCompile Name="output/Demo.elf.dis" />
+        <Library Name="../../lib/libadStar.a" />
+        <Library Name="../../lib/libjpeg.a" />
+        <Library Name="../../lib/libmad.a" />
+        <Library Name="../../lib/libpng.a" />
+        <Library Name="../../lib/libz.a" />
+        <LastOpenFile Name="../drive/smart_bed_remocon.c" Line="1" />
+    </Files>
+    <Event cmd="" desc="" enable="true" />
+    <Debug>
+        <Argument Name="" />
+        <UseGlobalOption Name="true" />
+        <breakpoint Name="mp3main.c,373" />
+    </Debug>
+</EISCStudioProject>
