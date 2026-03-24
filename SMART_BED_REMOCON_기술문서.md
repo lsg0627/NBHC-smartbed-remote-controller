@@ -249,11 +249,11 @@ smart_bed/
 | 파일 | 줄 수 | 주요 역할 |
 |------|-------|-----------|
 | `app/main.c` | 80 | 시스템 초기화, 메인 이벤트 루프 |
-| `code/user_task.c` | 489 | 이미지 로드, 타이머, 모드별 UI proc/draw, 전원 제어 |
+| `code/user_task.c` | ~540 | 이미지 로드, 타이머, 모드별 UI proc/draw, 전원 제어, 종료 진행 관리 |
 | `code/ui_globals.c` | 17 | pDC 초기화, 상태값 초기화 |
 | `drive/smart_bed_remocon.c` | ~1460 | 포트 초기화, LED 제어, 커서/키 처리, 모드별 초기값, conform 처리 |
 | `drive/lcd.c` | 125 | SPI 초기화, ILI9488 LCD 초기화 명령 |
-| `drive/key.c` | 222 | SPI 시프트 레지스터 키 읽기, 키 디바운싱, 키 이벤트 분배 |
+| `drive/key.c` | ~310 | SPI 시프트 레지스터 키 읽기, 키 디바운싱, 전원키 롱/숏클릭 판별, 키 이벤트 분배 |
 | `drive/protocol.c` | 635 | ESP32 UART 통신 (패킷 송수신, CRC16, 파싱) |
 
 ### 3.3 주요 자료구조
@@ -270,6 +270,7 @@ typedef enum {
     MODE_VENTILATION,     // 통풍
     MODE_SET_SAVE,        // 설정/저장
     MODE_INITIAL,         // 초기화
+    MODE_SHUTDOWN,        // 종료 화면 ("종료합니다.")
     MODE_MAX
 } _status;
 
@@ -456,10 +457,11 @@ get_spi_key()
 ### 5.4 디바운싱
 
 ```c
-#define KEY_CNT 30  // 디바운싱 카운트
+#define KEY_CNT      5    // 디바운싱 카운트 (약 0.1초)
+#define LONG_KEY_CNT 124  // 롱클릭 판정 카운트 (약 3초)
 
 key_proc() {
-    current = get_spi_key();
+    current = get_spi_key() | ~KEY_MASK;  // 미사용 비트(7,15) 노이즈 차단
     if (old != current) {
         old = current;
         count = KEY_CNT;     // 카운트 리셋
@@ -482,8 +484,23 @@ key_proc() {
 ```
 key_read()
     │
-    ├── POWER_KEY → remocon_power_ctrl(true/false)  // 전원 토글
-    │                                                // power==false이면 이후 키 무시
+    ├── [전원 ON 상태] 전원키 숏/롱 판별 (독립 처리)
+    │   ├── 전원키 누름 감지 → 추적 시작 (power_key_active = true)
+    │   ├── 독립 홀드 카운터 (power_hold_cnt): SPI 원시값 기반
+    │   │   └── power_hold_cnt >= LONG_KEY_CNT(124) → 즉시 종료 루틴
+    │   │       ├── remocon_power_ctrl(REMO_STDBY_OFF)
+    │   │       ├── "종료합니다." 화면 표시 (MODE_SHUTDOWN)
+    │   │       └── power = false, 모든 키 차단
+    │   └── 릴리즈 디바운스 (노이즈 내성: 감소 방식)
+    │       └── power_release_cnt >= KEY_CNT(5) → 숏클릭 확정
+    │           ├── STDBY HOME (초기위치 복귀 + 홈 화면)
+    │           └── stdby_in_progress = true (키 차단)
+    │
+    ├── [stdby_in_progress] → return  // 초기위치 복귀 중 모든 키 차단
+    │
+    ├── [전원 OFF 상태] POWER_KEY → remocon_power_ctrl(REMO_PWR_ON)
+    │                               power = true
+    │
     ├── CONFORM_KEY → key_val = CONFORM_KEY         // 확인 키
     ├── UP_KEY      → key_val = UP_KEY              // 상 이동
     ├── DOWN_KEY    → key_val = DOWN_KEY            // 하 이동
@@ -498,6 +515,14 @@ key_read()
     ├── SET_KEY      → key_val = SET_KEY            // 설정/저장
     └── INIT_KEY     → status = MODE_INITIAL        // 초기화
 ```
+
+### 5.6 전원키 노이즈 대책
+
+SPI 시프트 레지스터의 미사용 비트(7, 15)가 플로팅되어 노이즈 발생 가능. 이를 방지하기 위한 3가지 대책:
+
+1. **SPI 미사용 비트 마스킹**: `get_spi_key() | ~KEY_MASK`로 미사용 비트를 항상 1로 고정
+2. **독립 홀드 카운터**: `key_proc()`의 `hold_count`가 바운스로 리셋되는 문제 회피. SPI 원시값 기반 `power_hold_cnt`로 독립 추적
+3. **노이즈 내성 릴리즈 디바운스**: 릴리즈 카운터를 리셋(=0) 대신 감소(-1)하여 간헐적 노이즈 허용. 안전 타임아웃으로 `power_active_frames > (LONG_KEY_CNT + KEY_CNT) * 2` 시 강제 릴리즈 확정
 
 ---
 
@@ -593,6 +618,11 @@ CRTC 타이밍 (HVSYNC 60Hz @ 12MHz):
     │      │      │       │      │      │       │      │
     └──────┴──────┴───────┴──────┴──────┴───────┴──────┘
               각 모드에서 다른 기능 키로 직접 전환 가능
+
+  ※ 전원키 롱클릭(~3초) 시:
+    [任意 모드] ──롱클릭──▶ MODE_SHUTDOWN ──ESP32 ACK──▶ LCD OFF
+                          ("종료합니다." 표시)
+                          (모든 키 입력 차단)
 ```
 
 ### 7.2 각 모드의 proc/draw 구성
@@ -682,6 +712,7 @@ void progress_lcd_display() {
             case MODE_VENTILATION: ventilation_draw();      break;
             case MODE_SET_SAVE:   manual_selft_test_draw(); break;
             case MODE_INITIAL:    initial_draw();           break;
+            case MODE_SHUTDOWN:   shutdown_draw();          break;
         }
         display_refresh = false;  // 갱신 완료
     }
@@ -844,12 +875,14 @@ void progress_lcd_display() {
 
 ### 9.1 전원 제어
 
+전원키는 **숏클릭**(릴리즈 판별)과 **롱클릭**(~3초 즉시 판별)으로 동작이 분리됩니다.
+
 ```
 전원 상태 전이도:
 
     REMO_PWR_ON (0)         ← 초기 상태 (전원 미입력)
          │
-         │ 전원 키 입력 (power=true)
+         │ 전원 키 클릭 (power=true)
          │ → LCD_ON()
          │ → ESP32: PWR_ON (0x80)
          │ → ESP32: INIT (0xFF)
@@ -858,18 +891,46 @@ void progress_lcd_display() {
          ▼
     REMO_LCD_ON (1)         ← 정상 동작 상태
          │
-         │ 전원 키 입력 (power=false)
-         │ → LCD_OFF()
-         │ → ESP32: PWR_OFF (0x81)
-         ▼
-    REMO_LCD_OFF (2)        ← LCD 꺼짐 (대기 상태)
+         ├── 숏클릭 (릴리즈 시 LONG_KEY_CNT 미달)
+         │   → ESP32: STDBY (0xF0)
+         │   → MODE_HOME (홈 화면 표시)
+         │   → stdby_in_progress = true (키 차단)
+         │   → ESP32 ACK 수신 시 키 차단 해제
          │
-         │ 전원 키 입력 (power=true)
-         │ → LCD_ON()
-         │ → ESP32: PWR_ON (0x80)
-         │ → MODE_HOME
-         ▼
-    REMO_LCD_ON (1)         ← 복귀
+         └── 롱클릭 (~3초, 즉시 실행)
+             → REMO_STDBY_OFF (3)
+             → ESP32: STDBY (0xF0)
+             → MODE_SHUTDOWN ("종료합니다." 화면)
+             → stdby_in_progress = true (모든 키 차단)
+             → power = false
+                  │
+                  │ ESP32 ACK 수신 (또는 타임아웃 ~60초)
+                  ▼
+             REMO_LCD_OFF (2)
+             → ESP32: PWR_OFF (0x81)
+             → "종료합니다." 1.5초 표시
+             → LCD_OFF()
+                  │
+                  │ 전원 키 클릭 (power=true)
+                  │ → LCD_ON()
+                  │ → ESP32: PWR_ON (0x80)
+                  │ → MODE_HOME
+                  ▼
+             REMO_LCD_ON (1)         ← 복귀
+```
+
+#### 종료 화면 (MODE_SHUTDOWN)
+
+롱클릭 시 홈 화면 대신 "종료합니다." 화면을 표시합니다. 검은 배경에 흰색 한글 텍스트로 렌더링되며, 초기위치 복귀가 완료될 때까지 유지됩니다. 종료 화면 표시 중에는 모든 키 입력이 차단됩니다 (`stdby_in_progress`).
+
+```c
+void shutdown_draw(void) {
+    set_draw_target(getbackframe());
+    draw_rectfill(0, 0, 320, 480, MAKE_COLORREF(0, 0, 0));  // 검은 배경
+    egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
+    draw_text_kr(g_pFontKor, 95, 226, "종료합니다.");
+    flip();
+}
 ```
 
 ### 9.2 교대부양 (MODE_LEVITATE)

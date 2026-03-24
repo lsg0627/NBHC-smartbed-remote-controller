@@ -68,7 +68,7 @@ U16 get_spi_key(void){
 
 
 void key_proc(void){
-	remocon_key.current = get_spi_key();
+	remocon_key.current = get_spi_key() | ~KEY_MASK;
 	if(remocon_key.old != remocon_key.current){
 		debugprintf("\n\r old[%x], cur[%x]", remocon_key.old, remocon_key.current);
 		remocon_key.old = remocon_key.current;
@@ -111,55 +111,79 @@ void key_proc(void){
 // 전원키 릴리즈 감지용
 static bool power_key_active = false;	// 전원키 추적 중
 static bool power_key_long = false;		// 롱클릭 감지됨
+static U32 power_release_cnt = 0;		// 릴리즈 디바운스 카운터
+static U32 power_hold_cnt = 0;			// 독립 홀드 카운터 (key_proc 바운스 영향 없음)
+static U32 power_active_frames = 0;	// power_key_active 유지 프레임 수
 
 void key_read(void){
 	key_proc();
 
 	bool power_pressed = !(remocon_key.current & POWER_KEY);
 
-	// ---- 전원 ON 상태: 전원키 릴리즈 시점에서 숏/롱 판별 ----
+	// ---- 전원 ON 상태: 숏클릭=릴리즈 판별, 롱클릭=즉시 실행 ----
 	if(power == true){
 		// 전원키 누름 감지 → 추적 시작 (stdby 중에도 동작)
 		if(!power_key_active && power_pressed && remocon_key.pushed && !remocon_key.run){
 			power_key_active = true;
 			power_key_long = false;
+			power_release_cnt = 0;
+			power_hold_cnt = 0;
+			power_active_frames = 0;
 			remocon_key.run = true;	// 다른 키 처리 방지
 		}
 
-		// 누르고 있는 동안 롱클릭 감지 업데이트
-		if(power_key_active && remocon_key.long_pushed){
-			power_key_long = true;
-		}
-
-		// 키 릴리즈 감지 → 동작 실행
-		if(power_key_active && !power_pressed){
-			power_key_active = false;
-			if(power_key_long){
-				// 롱클릭 → STDBY OFF
-				debugprintf("\n\r KEY : POWER LONG RELEASE -> STDBY OFF");
-				if(!stdby_in_progress){
-					remocon_power_ctrl(REMO_STDBY_OFF);
-				} else {
-					power_off_pending = true;
-				}
-				power = false;
-			} else {
-				// 숏클릭 → STDBY HOME (stdby 중에는 무시)
-				if(!stdby_in_progress){
-					debugprintf("\n\r KEY : POWER SHORT RELEASE -> STDBY HOME");
-					U8 tmp = 0;
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_STDBY, &tmp, 0);
-					smart_bed_status.status = MODE_HOME;
-					smart_bed_display.display_refresh = true;
-					stdby_in_progress = true;
-					stdby_complete = false;
-					power_off_pending = false;
-					stdby_timeout = 6000;
+		// 독립 홀드 카운터: SPI 원시값 기반, key_proc 리셋 영향 없음
+		if(power_key_active){
+			power_active_frames++;
+			if(power_pressed){
+				power_hold_cnt++;
+				// 롱클릭 판정 → 즉시 종료 루틴 시작
+				if(power_hold_cnt >= LONG_KEY_CNT){
+					debugprintf("\n\r KEY : POWER LONG -> STDBY OFF");
+					power_key_active = false;
+					power_key_long = true;
+					power_release_cnt = 0;
+					power_hold_cnt = 0;
+					if(!stdby_in_progress){
+						remocon_power_ctrl(REMO_STDBY_OFF);
+					} else {
+						power_off_pending = true;
+					}
+					power = false;
+					remocon_key.run = true;
+					return;
 				}
 			}
+			// 릴리즈 디바운스 (노이즈 내성: 리셋 대신 감소)
+			if(!power_pressed){
+				power_release_cnt++;
+			} else {
+				if(power_release_cnt > 0) power_release_cnt--;
+			}
+			// 안전 타임아웃: 오래 유지되면 강제 릴리즈 확정
+			if(!power_pressed && power_active_frames > (LONG_KEY_CNT + KEY_CNT) * 2){
+				power_release_cnt = KEY_CNT;
+			}
+		}
+
+		// 릴리즈 확정 → 숏클릭만 처리 (롱클릭은 위에서 즉시 처리됨)
+		if(power_key_active && power_release_cnt >= KEY_CNT){
+			power_key_active = false;
+			power_release_cnt = 0;
+			power_hold_cnt = 0;
+			// 숏클릭 → STDBY HOME (stdby 중에는 무시)
+			if(!power_key_long && !stdby_in_progress){
+				debugprintf("\n\r KEY : POWER SHORT RELEASE -> STDBY HOME");
+				U8 tmp = 0;
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_STDBY, &tmp, 0);
+				smart_bed_status.status = MODE_HOME;
+				smart_bed_display.display_refresh = true;
+				stdby_in_progress = true;
+				stdby_complete = false;
+				power_off_pending = false;
+				stdby_timeout = 6000;
+			}
 			power_key_long = false;
-			remocon_key.long_pushed = false;
-			remocon_key.hold_count = 0;
 			remocon_key.run = true;
 			return;
 		}

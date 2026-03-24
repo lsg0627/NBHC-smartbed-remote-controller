@@ -10,6 +10,7 @@ typedef enum{
 	MODE_VENTILATION,	// 통풍
 	MODE_SET_SAVE, 		// 설정,저장
 	MODE_INITIAL	,			// 초기화
+	MODE_SHUTDOWN,				// 종료 화면
 	MODE_MAX
 }_status;
 

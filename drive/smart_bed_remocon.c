@@ -86,14 +86,20 @@ static void draw_text_kr(EGL_FONT* font, int x, int y, const char* utf8_str)
 	bitfont_draw(font, x, y, euckr);
 }
 
-// 종료 화면 표시
-void show_shutdown_screen(void)
+// 종료 화면 그리기 (progress_lcd_display에서 호출)
+void shutdown_draw(void)
 {
 	set_draw_target(getbackframe());
 	draw_rectfill(0, 0, 320, 480, MAKE_COLORREF(0, 0, 0));
 	egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
 	draw_text_kr(g_pFontKor, 95, 226, "종료합니다.");
 	flip();
+}
+
+// 종료 화면 표시 (LCD OFF 직전, 딜레이 포함)
+void show_shutdown_screen(void)
+{
+	shutdown_draw();
 	delayms(1500);
 }
 

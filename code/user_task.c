@@ -410,7 +410,8 @@ void remocon_power_ctrl(U8 remo_pwr)
 
 		case REMO_STDBY_OFF:	// 롱클릭: 초기위치 복귀 + 전원 OFF 대기
 			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_STDBY, &tmp, 0);
-			smart_bed_status.status = MODE_HOME;
+			smart_bed_status.status = MODE_SHUTDOWN;
+			smart_bed_display.status = MODE_SHUTDOWN;
 			smart_bed_display.display_refresh = true;
 			stdby_in_progress = true;
 			power_off_pending = true;
@@ -530,9 +531,13 @@ void progress_lcd_display(void){
 			// 온열/통풍은 화면 없음 (LED만 제어)
 			case MODE_INITIAL:
 				initial_draw();
+				break;
+			case MODE_SHUTDOWN:
+				shutdown_draw();
+				break;
 		}
-		
+
 		smart_bed_display.display_refresh = false;
 	}
-		
+
 }

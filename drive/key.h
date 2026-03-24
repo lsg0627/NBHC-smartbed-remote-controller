@@ -16,8 +16,8 @@
 #define POWER_KEY	(1<<0)	// 전원
 
 #define KEY_MASK	0x7F7F
-#define KEY_CNT	30
-#define LONG_KEY_CNT	55	// 롱클릭 판정 (~2초)
+#define KEY_CNT	5
+#define LONG_KEY_CNT	300	// 롱클릭 판정 (~3초)
 
 #define CURSOR_MODE	0
 #define CURSOR_BODY	1

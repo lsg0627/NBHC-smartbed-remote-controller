@@ -106,5 +106,6 @@ extern U8 get_smart_bed_remocon_boot_mode(void);
 extern bool usb_get_detection(void);
 extern void get_bar_run_info(void);
 extern void show_shutdown_screen(void);
+extern void shutdown_draw(void);
 
 
