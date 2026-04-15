@@ -57,8 +57,23 @@
 #define CMD2_HEAT2	0x52
 #define CMD2_HEAT3	0x53
 
-#define CMD2_VENTIL	0x60	// 통풍 OFF
+#define CMD2_VENTIL	0x60	// (미사용 — 통풍 기능 없음)
+#define CMD2_VOLUME	0xB0	// 볼륨 0 (음소거)
+#define CMD2_VOLUME1	0xB1	// 볼륨 25
+#define CMD2_VOLUME2	0xB2	// 볼륨 50
+#define CMD2_VOLUME3	0xB3	// 볼륨 100
 
+// 자세제어 (등판/다리판 모터)
+#define CMD2_POSTURE_BACK_UP	0x45	// 등판 올림
+#define CMD2_POSTURE_BACK_DOWN	0x46	// 등판 내림
+#define CMD2_POSTURE_BACK_STOP	0x47	// 등판 정지
+#define CMD2_POSTURE_LEG_UP		0x48	// 다리판 올림
+#define CMD2_POSTURE_LEG_DOWN	0x49	// 다리판 내림
+#define CMD2_POSTURE_LEG_STOP	0x4A	// 다리판 정지
+
+// 낙상 경고 (메인보드 → 리모컨)
+#define CMD2_FALL_ALERT		0xA0	// 낙상 경고 발생
+#define CMD2_FALL_CLEAR		0xA1	// 낙상 경고 해제
 
 // // ------- DATA ----------
 // #define DATA_HEAD	0x10

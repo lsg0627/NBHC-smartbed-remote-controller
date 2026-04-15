@@ -199,6 +199,20 @@ SURFACE *right_run_arrow_img;
 SURFACE *left_select_img;
 SURFACE *right_select_img;
 
+// 자세제어
+SURFACE *posture_bg_img;
+SURFACE *posture_back_plate_img;
+SURFACE *posture_back_plate_a_img;
+SURFACE *posture_back_plate_icon_img;
+SURFACE *posture_leg_plate_img;
+SURFACE *posture_leg_plate_a_img;
+SURFACE *posture_leg_plate_icon_img;
+SURFACE *posture_all_plate_img;
+SURFACE *posture_all_plate_a_img;
+SURFACE *posture_all_plate_icon_img;
+SURFACE *posture_height_img;
+SURFACE *posture_height_a_img;
+
 const char *massage_file_list[12] = {
 	"image/top_nav_select.suf",	// 리듬타입
 	"image/top_nav_select2.suf", // 물결
@@ -288,6 +302,20 @@ void image_load(void){
 
 	left_select_img = loadsurf("image/btn_left_select.suf");
 	right_select_img = loadsurf("image/btn_right_select.suf");
+
+	// 자세제어
+	posture_bg_img = loadsurf("image/bg.suf");
+	posture_back_plate_img = loadsurf("image/back_plate.suf");
+	posture_back_plate_a_img = loadsurf("image/back_plate_a.suf");
+	posture_back_plate_icon_img = loadsurf("image/back_plate_icon.suf");
+	posture_leg_plate_img = loadsurf("image/leg_plate.suf");
+	posture_leg_plate_a_img = loadsurf("image/leg_plate_a.suf");
+	posture_leg_plate_icon_img = loadsurf("image/leg_plate_icon.suf");
+	posture_all_plate_img = loadsurf("image/all_plate.suf");
+	posture_all_plate_a_img = loadsurf("image/all_plate_a.suf");
+	posture_all_plate_icon_img = loadsurf("image/all_plate_icon.suf");
+	posture_height_img = loadsurf("image/height.suf");
+	posture_height_a_img = loadsurf("image/height_a.suf");
 }
 
 void load_font(void){
@@ -476,6 +504,23 @@ void check_stdby_progress(void)
 
 void process_analy_data(){
 	check_stdby_progress();
+
+	// 낙상 경고 상태: Pause(해제)와 PowerOff만 허용, 나머지 키 무시
+	if(smart_bed_status.status == MODE_FALL_ALERT){
+		if(remocon_key.key_val == CONFORM_KEY){
+			U8 tmp = 0;
+			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_FALL_CLEAR, &tmp, 0);
+			smart_bed_status.status = MODE_HOME;
+			smart_bed_display.status = MODE_HOME;
+			smart_bed_display.display_refresh = true;
+			remocon_key.key_val = 0xFF;
+			debugprintf("\n\r FALL ALERT DISMISSED by user");
+		}
+		// PowerOff는 key.c에서 처리됨 (FALL_ALERT 상태에서도 허용)
+		remocon_key.key_val = 0xFF;  // 나머지 키 무시
+		return;
+	}
+
 	switch(smart_bed_status.status){
 		case MODE_HOME:
 			home_proc();
@@ -501,6 +546,9 @@ void process_analy_data(){
 			// break;
 		case MODE_INITIAL:
 			initial_proc();
+			break;
+		case MODE_POSTURE:
+			posture_proc();
 			break;
 	}
 }
@@ -532,8 +580,14 @@ void progress_lcd_display(void){
 			case MODE_INITIAL:
 				initial_draw();
 				break;
+			case MODE_POSTURE:
+				posture_draw();
+				break;
 			case MODE_SHUTDOWN:
 				shutdown_draw();
+				break;
+			case MODE_FALL_ALERT:
+				fall_alert_draw();
 				break;
 		}
 

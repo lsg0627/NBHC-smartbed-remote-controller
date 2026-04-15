@@ -108,4 +108,15 @@ extern void get_bar_run_info(void);
 extern void show_shutdown_screen(void);
 extern void shutdown_draw(void);
 
+// 자세제어
+enum {
+	POSTURE_BACK = 0,	// 등판
+	POSTURE_LEG,		// 다리판
+	POSTURE_ALL,		// 등/다리
+	POSTURE_TYPE_MAX
+};
+
+extern void posture_proc(void);
+extern void posture_draw(void);
+
 

@@ -10,7 +10,9 @@ typedef enum{
 	MODE_VENTILATION,	// 통풍
 	MODE_SET_SAVE, 		// 설정,저장
 	MODE_INITIAL	,			// 초기화
+	MODE_POSTURE,				// 자세제어
 	MODE_SHUTDOWN,				// 종료 화면
+	MODE_FALL_ALERT,			// 낙상 경고 화면
 	MODE_MAX
 }_status;
 
@@ -120,6 +122,20 @@ extern SURFACE *left_run_arrow_img;
 extern SURFACE *right_run_arrow_img;
 extern SURFACE *left_select_img;
 extern SURFACE *right_select_img;
+
+// 자세제어
+extern SURFACE *posture_bg_img;
+extern SURFACE *posture_back_plate_img;
+extern SURFACE *posture_back_plate_a_img;
+extern SURFACE *posture_back_plate_icon_img;
+extern SURFACE *posture_leg_plate_img;
+extern SURFACE *posture_leg_plate_a_img;
+extern SURFACE *posture_leg_plate_icon_img;
+extern SURFACE *posture_all_plate_img;
+extern SURFACE *posture_all_plate_a_img;
+extern SURFACE *posture_all_plate_icon_img;
+extern SURFACE *posture_height_img;
+extern SURFACE *posture_height_a_img;
 
 extern SMART_BED_DISP_STATUS smart_bed_display;
 extern SMART_BED_STATUS smart_bed_status;

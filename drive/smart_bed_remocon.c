@@ -103,6 +103,32 @@ void show_shutdown_screen(void)
 	delayms(1500);
 }
 
+// 낙상 경고 화면 그리기: 까만 배경 + 빨간 원 + "낙상 경고" 텍스트
+void fall_alert_draw(void)
+{
+	set_draw_target(getbackframe());
+
+	// 까만 배경
+	draw_rectfill(0, 0, 320, 480, MAKE_COLORREF(0, 0, 0));
+
+	// 빨간 원 (중앙, 반지름 80 — roundrectfill로 원형 근사)
+	draw_roundrectfill(80, 120, 160, 160, 80, MAKE_COLORREF(220, 30, 30));
+
+	// 원 안에 흰색 느낌표
+	egl_font_set_color(g_pFont48, MAKE_COLORREF(255, 255, 255));
+	bmpfont_draw(g_pFont48, 148, 160, "!");
+
+	// "낙상 경고" 텍스트 (원 아래)
+	egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 60, 60));
+	draw_text_kr(g_pFontKor, 96, 310, "낙상 경고");
+
+	// 안내 메시지
+	egl_font_set_color(g_pFontKor16, MAKE_COLORREF(180, 180, 180));
+	draw_text_kr(g_pFontKor16, 52, 370, "확인 버튼을 눌러 해제하세요");
+
+	flip();
+}
+
 // 설정 모드 표시 바 (임시 비활성)
 static void draw_mode_indicator(void)
 {
@@ -382,6 +408,8 @@ void heat_value_power_init(void)
 void ventilation_value_power_init(void)
 {
 	memset(&ventilation, 0, sizeof(BODY));
+	ventilation.body[0][0] = 1;  // 볼륨 기본값: LOW (25)
+	ventilation_led_ctrl(1);
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////
 // up key로 이동을 수행한다.
@@ -2161,6 +2189,131 @@ void manual_selft_test_draw(void){
 }
 // ====================== 매뉴얼설정 & 자가진단 End ================= //
 
- 
-	
-	
+
+// ====================== 자세제어 Start ================= //
+
+// 탭 버튼 좌표
+#define POSTURE_TAB_Y		55
+#define POSTURE_TAB_X0		10		// 등판
+#define POSTURE_TAB_X1		110		// 다리판
+#define POSTURE_TAB_X2		210		// 등/다리
+
+// 아이콘 좌표
+#define POSTURE_ICON_X		50
+#define POSTURE_ICON_Y		230
+
+// 화살표 좌표
+#define POSTURE_ARROW_CX	160		// 화살표 중심 X
+#define POSTURE_ARROW_UP_Y	170		// ▲ 꼭지점 Y
+#define POSTURE_ARROW_DN_Y	430		// ▼ 꼭지점 Y
+#define POSTURE_ARROW_SIZE	25		// 화살표 크기 (높이)
+
+static void draw_triangle_up(int cx, int cy, int size, U32 color)
+{
+	int i;
+	for(i = 0; i < size; i++){
+		int w = i;
+		draw_rectfill(cx - w, cy + i, w * 2 + 1, 1, color);
+	}
+}
+
+static void draw_triangle_down(int cx, int cy, int size, U32 color)
+{
+	int i;
+	for(i = 0; i < size; i++){
+		int w = i;
+		draw_rectfill(cx - w, cy + size - 1 - i, w * 2 + 1, 1, color);
+	}
+}
+
+void posture_proc(void)
+{
+	if(smart_bed_display.status != MODE_POSTURE){
+		smart_bed_display.status = MODE_POSTURE;
+		smart_bed_display.display_refresh = true;
+		cursor.type = POSTURE_ALL;
+		cursor.type_max = POSTURE_TYPE_MAX;
+		remocon_key.key_val = 0xFF;
+		return;
+	}
+
+	U8 tmp = 0;
+
+	switch(remocon_key.key_val){
+		case LEFT_KEY:
+			if(cursor.type > 0)
+				cursor.type--;
+			else
+				cursor.type = POSTURE_TYPE_MAX - 1;
+			smart_bed_display.display_refresh = true;
+			break;
+
+		case RIGHT_KEY:
+			cursor.type++;
+			if(cursor.type >= POSTURE_TYPE_MAX)
+				cursor.type = 0;
+			smart_bed_display.display_refresh = true;
+			break;
+
+		// UP/DOWN은 key_read()에서 누름/뗌 실시간 감지로 처리
+		// (누르는 동안 모터 동작, 떼면 정지)
+
+		case CONFORM_KEY:
+			// 모터 전체 정지 (안전)
+			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
+			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
+			debugprintf("\n\r POSTURE: ALL STOP");
+			break;
+	}
+	remocon_key.key_val = 0xFF;
+}
+
+void posture_draw(void)
+{
+	set_draw_target(getbackframe());
+
+	// 배경
+	draw_surface(posture_bg_img, 0, 0);
+
+	// 탭 버튼 (선택된 탭은 _a 이미지 사용)
+	if(cursor.type == POSTURE_BACK)
+		draw_surface(posture_back_plate_a_img, POSTURE_TAB_X0, POSTURE_TAB_Y);
+	else
+		draw_surface(posture_back_plate_img, POSTURE_TAB_X0, POSTURE_TAB_Y);
+
+	if(cursor.type == POSTURE_LEG)
+		draw_surface(posture_leg_plate_a_img, POSTURE_TAB_X1, POSTURE_TAB_Y);
+	else
+		draw_surface(posture_leg_plate_img, POSTURE_TAB_X1, POSTURE_TAB_Y);
+
+	if(cursor.type == POSTURE_ALL)
+		draw_surface(posture_all_plate_a_img, POSTURE_TAB_X2, POSTURE_TAB_Y);
+	else
+		draw_surface(posture_all_plate_img, POSTURE_TAB_X2, POSTURE_TAB_Y);
+
+	// 침대 아이콘 (선택된 판에 해당하는 아이콘)
+	switch(cursor.type){
+		case POSTURE_BACK:
+			draw_surface(posture_back_plate_icon_img, POSTURE_ICON_X, POSTURE_ICON_Y);
+			break;
+		case POSTURE_LEG:
+			draw_surface(posture_leg_plate_icon_img, POSTURE_ICON_X, POSTURE_ICON_Y);
+			break;
+		case POSTURE_ALL:
+			draw_surface(posture_all_plate_icon_img, POSTURE_ICON_X, POSTURE_ICON_Y);
+			break;
+	}
+
+	// ▲ 위 화살표 (파란색)
+	draw_triangle_up(POSTURE_ARROW_CX, POSTURE_ARROW_UP_Y, POSTURE_ARROW_SIZE,
+		MAKE_COLORREF(50, 120, 220));
+
+	// ▼ 아래 화살표 (파란색)
+	draw_triangle_down(POSTURE_ARROW_CX, POSTURE_ARROW_DN_Y, POSTURE_ARROW_SIZE,
+		MAKE_COLORREF(50, 120, 220));
+
+	flip();
+}
+
+// ====================== 자세제어 End ================= //
+

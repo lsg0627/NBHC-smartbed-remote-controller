@@ -59,7 +59,7 @@
         <Library Name="../../lib/libmad.a" />
         <Library Name="../../lib/libpng.a" />
         <Library Name="../../lib/libz.a" />
-        <LastOpenFile Name="../drive/key.h" Line="22" />
+        <LastOpenFile Name="../drive/key.h" Line="34" />
     </Files>
     <Event cmd="" desc="" enable="true" />
     <Debug>

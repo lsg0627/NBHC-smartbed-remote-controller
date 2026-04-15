@@ -587,6 +587,18 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 						running_massage_type = buff[ACTI_D + i] - CMD2_MASSAGE;
 						debugprintf("\n\r ACK: MASSAGE %d", running_massage_type + 1);
 					}
+					else if(buff[ACTI_D + i] == CMD2_FALL_ALERT){
+						smart_bed_status.status = MODE_FALL_ALERT;
+						smart_bed_display.status = MODE_FALL_ALERT;
+						smart_bed_display.display_refresh = true;
+						debugprintf("\n\r *** FALL ALERT ***");
+					}
+					else if(buff[ACTI_D + i] == CMD2_FALL_CLEAR){
+						smart_bed_status.status = MODE_HOME;
+						smart_bed_display.status = MODE_HOME;
+						smart_bed_display.display_refresh = true;
+						debugprintf("\n\r FALL ALERT CLEARED");
+					}
 					break;
 				case CMD1_DATA_SYNC:	// ESP32 → 리모컨 설정 동기화
 				{
