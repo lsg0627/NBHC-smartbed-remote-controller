@@ -5,6 +5,7 @@
 #define _USB_ENABLE()	*R_GPOHIGH(8) = (1<<2)
 #define _USB_DISABLE()	*R_GPOLOW(8) = (1<<2)
 
+extern U8 conform_key_run;
 extern U16 radio_xy[4][2];
 extern U16 num2_xy[2][2];
 extern U16 num3_xy[3][2];
@@ -60,7 +61,7 @@ extern U8 body_set_max[BODY_LEVIT_MAX];
 
 enum{
 	PATIENT_HEAD = 0,// 머리감기
-	PATIENT_DEFEC,	// 배변
+	PATIENT_MEAL,	// 식사
 	PATIENT_SHIFT,		// 이동
 };
 
@@ -119,4 +120,6 @@ enum {
 extern void posture_proc(void);
 extern void posture_draw(void);
 
+// 상태 오버레이 (홈 화면 등에서 호출)
+extern void draw_status_overlay(void);
 

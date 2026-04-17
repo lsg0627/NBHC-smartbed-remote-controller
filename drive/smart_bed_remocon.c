@@ -5,6 +5,7 @@
 
 U8 conform_key_run = 0;
 int running_massage_type = -1;	// 현재 동작 중인 마사지 (-1: 없음, 0~11: 마사지 번호)
+BED_STATUS_DATA bed_status = {0};  // 침대 상태 (ESP32에서 2초 주기 수신)
 U8 body_set_max[BODY_LEVIT_MAX] = {0,};
 U8 bar[16] = {0,};
 bool body_info = false;
@@ -101,6 +102,125 @@ void show_shutdown_screen(void)
 {
 	shutdown_draw();
 	delayms(1500);
+}
+
+// ---------------------------------------------------------------------------
+// 공통 상태 오버레이: 화면 상단(타이틀 아래)에 현재 동작 상태 표시
+// dispersion_draw, levitate_draw, massage_draw 등에서 호출
+// ---------------------------------------------------------------------------
+static const char* get_mode_name(U8 mode) {
+	static char massage_buf[16];
+	switch(mode) {
+		case 0x00: return "대기 중";
+		case 0x10: return "교대부양 표준";
+		case 0x11: return "교대부양 집중";
+		case 0x12: return "교대부양 수면";
+		case 0x20: return "체압분산";
+		case 0x40: return "머리감기";
+		case 0x41: return "배변";
+		case 0x4B: return "식사 모드";
+		case 0x4C: return "수평 복귀";
+		case 0x4D: return "무중력";
+		default:
+			if(mode >= 0x31 && mode <= 0x3C) {
+				sprintf(massage_buf, "마사지(%d)", mode - 0x30);
+				return massage_buf;
+			}
+			return "";
+	}
+}
+
+static const char* get_state_name(U8 state) {
+	switch(state) {
+		case 0: return "";
+		case 1: return "동작 중";
+		case 2: return "일시정지";
+		case 3: return "초기화 중";
+		default: return "";
+	}
+}
+
+static const char* get_heat_name(U8 level) {
+	switch(level) {
+		case 0: return "OFF";
+		case 1: return "약";
+		case 2: return "중";
+		case 3: return "강";
+		default: return "-";
+	}
+}
+
+void draw_status_overlay(void)
+{
+	// 반투명 배경
+	draw_rectfill(5, 60, 310, 135, MAKE_COLORREF(0, 0, 30));
+
+	// 4행 균등 배치: Y=70, 99, 128, 157 (간격 29px, 상하 10px 여유)
+	// 1행: 모드 이름 + 상태
+	egl_font_set_color(g_pFontKor, MAKE_COLORREF(0, 210, 255));
+	draw_text_kr(g_pFontKor, 10, 70, get_mode_name(bed_status.current_mode));
+
+	egl_font_set_color(g_pFontKor, MAKE_COLORREF(200, 200, 200));
+	draw_text_kr(g_pFontKor, 200, 70, get_state_name(bed_status.run_state));
+
+	// 2행: 등판
+	{
+		char buf[32];
+		int bar_w = 120;
+		int bar_h = 14;
+
+		egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
+		draw_text_kr(g_pFontKor, 10, 99, "등판");
+		draw_rectfill(80, 105, bar_w, bar_h, MAKE_COLORREF(40, 40, 60));
+		if(bed_status.backrest_percent > 0) {
+			int fill = (bar_w * bed_status.backrest_percent) / 100;
+			draw_rectfill(80, 105, fill, bar_h, MAKE_COLORREF(0, 180, 255));
+		}
+		sprintf(buf, "%d%%", bed_status.backrest_percent);
+		egl_font_set_color(g_pFont28, MAKE_COLORREF(255, 255, 255));
+		bmpfont_draw(g_pFont28, 210, 99, buf);
+
+	// 3행: 다리판
+		egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
+		draw_text_kr(g_pFontKor, 10, 128, "다리");
+		draw_rectfill(80, 134, bar_w, bar_h, MAKE_COLORREF(40, 40, 60));
+		if(bed_status.leg_panel_percent > 0) {
+			int fill = (bar_w * bed_status.leg_panel_percent) / 100;
+			draw_rectfill(80, 134, fill, bar_h, MAKE_COLORREF(0, 200, 160));
+		}
+		sprintf(buf, "%d%%", bed_status.leg_panel_percent);
+		egl_font_set_color(g_pFont28, MAKE_COLORREF(255, 255, 255));
+		bmpfont_draw(g_pFont28, 210, 128, buf);
+	}
+
+	// 4행: 히터 + 볼륨
+	{
+		char buf[32];
+
+		egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
+		draw_text_kr(g_pFontKor, 10, 157, "온열");
+		egl_font_set_color(g_pFontKor,
+			bed_status.heat_level > 0 ? MAKE_COLORREF(255, 160, 50) : MAKE_COLORREF(100, 100, 100));
+		draw_text_kr(g_pFontKor, 70, 157, get_heat_name(bed_status.heat_level));
+
+		egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
+		draw_text_kr(g_pFontKor, 150, 157, "볼륨");
+		sprintf(buf, "%d", bed_status.volume_level);
+		egl_font_set_color(g_pFont28, MAKE_COLORREF(255, 255, 255));
+		bmpfont_draw(g_pFont28, 215, 157, buf);
+	}
+
+	// 활성 바 표시 (매트리스 동작 중 건반 상태)
+	{
+		int i;
+		for(i = 0; i < MAX_BAR; i++) {
+			if(bar[i])
+				draw_surface(bar_img, BAR_X, (BAR_Y + BAR_I * i));
+		}
+		// 인체 이미지
+		if(body_info == true)
+			draw_surface(body_imag, BODY_X, BODY_Y);
+	}
 }
 
 // 낙상 경고 화면 그리기: 까만 배경 + 빨간 원 + "낙상 경고" 텍스트
@@ -609,6 +729,10 @@ void conform_key_proc(U8 cmd_act)
 					running_massage_type = -1;
 				esp32_packet_send(CMD1_SEND_RUN_ST, cmd_act, &conform_key_run , 1);
 				conform_key_run = CMD3_PAUSE;
+				// 모드 실행 후 홈화면으로 전환 (상태 오버레이로 동작 표시)
+				smart_bed_status.status = MODE_HOME;
+				smart_bed_display.status = MODE_HOME;
+				smart_bed_display.display_refresh = true;
 			}
 			else
 			{
@@ -922,7 +1046,7 @@ void levitate_proc(void)
 void levitate_draw(void){
 	int i = 0, num = 0, digits = 0;
 	char string[200] = {0, };
-	
+
 	set_draw_target(getbackframe());// back frame select
 	draw_surface(btm1_img,0,0);	// 배경 이미지(의미 없음)
 	draw_surface(levitate_title_img, TITLE_X, TITLE_Y);	// title 이미지
@@ -1098,7 +1222,7 @@ void massage_proc(void){
 void massage_draw(void){
 	int i = 0, num = 0, digits = 0;
 	char string[100] = {0, };
-	
+
 	set_draw_target(getbackframe());// back frame select
 	draw_surface(btm1_img,0,0);	// 배경 이미지(의미 없음)
 	draw_surface(massage_title_img, TITLE_X, TITLE_Y);	// title 이미지
@@ -1212,7 +1336,7 @@ void patient_care_proc(void)
 		smart_bed_display.display_refresh = true;
 		memset(&cursor, 0, sizeof(CURSOR));// key init
 		cursor.set_max = 0;
-		cursor.type_max = 2;	// 머리감기, 배변 (이동 제거)
+		cursor.type_max = 2;	// 머리감기, 식사 (배변→식사 변경)
 		memcpy(&temp_body, &patient_care, sizeof(BODY));
 
 		remocon_key.key_val = 0xFF;
@@ -1230,39 +1354,19 @@ void patient_care_proc(void)
 			remocon_key.key_val = 0xFF;
 			break;
 		case DOWN_KEY:
-			if(running_flag && cursor.type == PATIENT_DEFEC)
-			{	// 배변 모드 실행 중: 틸트 원위치 명령 전송
-				U8 tmp = 0;
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_CENTER, &tmp, 1);
-				smart_bed_display.display_refresh = true;
-			}
 			remocon_key.key_val = 0xFF;
 			break;
 		case LEFT_KEY:
-			if(running_flag && cursor.type == PATIENT_DEFEC)
-			{	// 배변 모드 실행 중: 좌 틸팅 명령 전송
-				U8 tmp = 0;
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_LEFT, &tmp, 1);
-				smart_bed_display.display_refresh = true;
-			}
-			else
+			if(!running_flag)
 			{
 				left_key_proc(true, patient_care);
-				running_flag = false;
 			}
 			remocon_key.key_val = 0xFF;
 			break;
 		case RIGHT_KEY:
-			if(running_flag && cursor.type == PATIENT_DEFEC)
-			{	// 배변 모드 실행 중: 우 틸팅 명령 전송
-				U8 tmp = 0;
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_RIGHT, &tmp, 1);
-				smart_bed_display.display_refresh = true;
-			}
-			else
+			if(!running_flag)
 			{
 				right_key_proc(true, patient_care);
-				running_flag = false;
 			}
 			remocon_key.key_val = 0xFF;
 			break;
@@ -1276,7 +1380,10 @@ void patient_care_proc(void)
 			else
 			{
 				running_flag = true;
-				conform_key_proc(CMD2_HEAR + cursor.type);
+				if(cursor.type == PATIENT_MEAL)
+					conform_key_proc(CMD2_MEAL);
+				else
+					conform_key_proc(CMD2_HEAR + cursor.type);
 			}
 			smart_bed_display.display_refresh = true;
 			remocon_key.key_val = 0xFF;
@@ -1290,9 +1397,9 @@ void patient_care_proc(void)
 	}
 }
 
-// 환자케어: 머리감기/배변 2버튼 중앙 배치 (이동 제거)
+// 환자케어: 머리감기/식사 2버튼 중앙 배치
 #define CARE_BTN1_X	50		// 머리감기 버튼 X
-#define CARE_BTN2_X	180		// 배변 버튼 X
+#define CARE_BTN2_X	180		// 식사 버튼 X
 
 void patient_care_draw(void)
 {
@@ -1315,8 +1422,8 @@ void patient_care_draw(void)
 	else
 		draw_surface(patient_head_img, CARE_BTN1_X, LEVIT_SUB_Y);
 
-	// 배변 버튼
-	if(cursor.type == PATIENT_DEFEC)
+	// 식사 버튼 (배변 이미지 재활용 — 추후 식사 전용 이미지로 교체)
+	if(cursor.type == PATIENT_MEAL)
 	{
 		if(running_flag)
 			draw_surface(patient_defec_sel_img, CARE_BTN2_X, LEVIT_SUB_Y);
@@ -1334,19 +1441,6 @@ void patient_care_draw(void)
 		draw_surface(patient_head_main_img, PATIENT_MAIN_IMG_X, PATIENT_MAIN_IMG_Y);
 	else
 		draw_surface(patient_shift_main_img, PATIENT_MAIN_IMG_X, PATIENT_MAIN_IMG_Y);
-
-	// 배변 모드 실행 중: 좌/우 틸팅 화살표 + 중앙 평탄화 버튼
-	if(running_flag && cursor.type == PATIENT_DEFEC)
-	{
-		draw_surface(left_arrow_img, 40, 380);
-		draw_surface(right_arrow_img, 213, 380);
-
-		// 중앙 평탄화 버튼 (▼ 버튼으로 동작, 화살표보다 1/3 아래)
-		draw_roundrectfill(120, 393, 80, 40, 8, MAKE_COLORREF(0, 100, 150));
-		draw_roundrect(120, 393, 80, 40, 8, MAKE_COLORREF(255, 255, 255));
-		egl_font_set_color(g_pFontKor16, MAKE_COLORREF(255, 255, 255));
-		draw_text_kr(g_pFontKor16, 136, 405, "평탄화");
-	}
 
 	flip();
 }

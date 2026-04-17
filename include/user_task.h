@@ -57,7 +57,8 @@ extern EGL_FONT* g_pFontKor16;	// 한글 bitfont (16px)
 
 extern SMART_BED_DISP_STATUS smart_bed_display;
 extern SMART_BED_STATUS smart_bed_status;
-extern SURFACE *home_img;
+extern SURFACE *home_img;     // boot.suf
+extern SURFACE *main_img;     // main.suf
 extern SURFACE *btm1_img;
 extern SURFACE *btm2_img;
 extern SURFACE *vaira_title_imag;

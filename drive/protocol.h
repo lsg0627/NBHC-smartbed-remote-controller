@@ -22,6 +22,7 @@
 #define CMD1_SEND_RUN_ST	0x10	// 동작상태 전송 ( 교대부양, 체압분산, 마사지, 온열, 통풍, 온열, 동작상태, 전원, 초기화 )
 #define CMD1_SEND_SET_VAL	0x20	// 설정 값 전송 ( 동작시간, RPM, 높이, 간격(동작주기), 마사지, 감도, 밸브, 자체검사 )
 #define CMD1_SEND_GET_BAR	0x30
+#define CMD1_BED_STATUS		0x40	// 침대 상태 정보 (주기적 수신)
 #define CMD1_GET_BAR_INFO	0x50	// 요청 (설정 값 요청, 동작 상태 요청 )
 #define CMD1_GET_PRESSURE_MAP	0x60	// 체압맵 데이터 수신 (7x10)
 #define CMD1_GET_BODY_INFO	0x70
@@ -47,10 +48,11 @@
 #define CMD2_MASSAGE	0x31	// massage 1
 
 #define CMD2_HEAR		0x40	// 머리감기
-#define CMD2_CATHARSIS	0x41	// 배변
+#define CMD2_CATHARSIS	0x41	// 배변 (사용 안 함)
 #define CMD2_MOVE_LEFT	0X42	// LEFT KEY
-#define CMD2_MOVE_RIGHT	0x43 // RIGHT KEY 
+#define CMD2_MOVE_RIGHT	0x43 // RIGHT KEY
 #define CMD2_MOVE_CENTER	0x44	// 틸트 원위치
+#define CMD2_MEAL		0x4B	// 식사 모드
 
 #define CMD2_HEAT	0x50	// 온열 OFF
 #define CMD2_HEAT1	0x51
@@ -93,6 +95,21 @@
 // #define CMD2_LED		0x08
 // #define CMD2_PWR		0x09	// 전원 OFF : 0 전원 ON : 1
 // //#define CMD2_INIT		0x0A	// 전원 값 초기화
+
+// --- 침대 상태 데이터 (CMD1_BED_STATUS, ESP32 → 리모컨 2초 주기) ---
+typedef struct {
+	U8 current_mode;       // [0] 현재 모드 (0x00=정지, 0x10=교대표준, 0x31=마사지01...)
+	U8 run_state;          // [1] 동작 (0=정지, 1=동작중, 2=일시정지, 3=초기화중)
+	U8 backrest_percent;   // [2] 등판 각도 (0~100%)
+	U8 leg_panel_percent;  // [3] 다리판 각도 (0~100%)
+	U8 heat_level;         // [4] 히터 (0=OFF, 1=약, 2=중, 3=강)
+	U8 volume_level;       // [5] 볼륨 (0=Mute, 1=Low, 2=Mid, 3=Max)
+	U8 fall_state;         // [6] 낙상 (0=정상, 1=주의, 2=경고, 3=알람)
+	U8 powered_on;         // [7] 전원 (0=OFF, 1=ON)
+	U8 reserved[2];        // [8-9] 예약
+} BED_STATUS_DATA;
+
+extern BED_STATUS_DATA bed_status;  // 전역 상태 (protocol.c에서 갱신)
 
 #define CMD3_START		0x00
 #define CMD3_PAUSE	0x01

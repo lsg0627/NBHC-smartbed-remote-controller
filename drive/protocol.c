@@ -629,6 +629,17 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 					debugprintf("\n\r SYNC: act=0x%02x body[%d]", act, body_idx);
 					break;
 				}
+				case CMD1_BED_STATUS:	// 침대 상태 (2초 주기 수신)
+				{
+					U8 dlen = buff[i + LENGTH];
+					debugprintf("\n\r [BED_STATUS] len=%d mode=0x%02x state=%d pwr=%d",
+						dlen, buff[i+LENGTH+1], buff[i+LENGTH+2], buff[i+LENGTH+8]);
+					if(dlen >= sizeof(BED_STATUS_DATA)){
+						memcpy(&bed_status, &buff[i + LENGTH + 1], sizeof(BED_STATUS_DATA));
+						smart_bed_display.display_refresh = true;
+					}
+					break;
+				}
 			}
 			esp32_uart.rx_read_pointer += buff[i+LENGTH] + LENGTH+ 3;
 			if(esp32_uart.rx_read_pointer == esp32_uart.rx_write_pointer)

@@ -130,7 +130,8 @@ void process_target_time_handler(void){
 
 SMART_BED_DISP_STATUS smart_bed_display;
 SMART_BED_STATUS smart_bed_status;
-SURFACE *home_img;
+SURFACE *home_img;     // boot.suf (부팅/초기화 화면)
+SURFACE *main_img;     // main.suf (메인 상태 화면 배경)
 SURFACE *btm1_img;
 SURFACE *btm2_img;
 SURFACE *vaira_title_imag;
@@ -231,7 +232,8 @@ const char *massage_file_list[12] = {
 void image_load(void){
 	int i;
 	
-	home_img = loadsurf("image/home.suf");
+	home_img = loadsurf("image/boot.suf");
+	main_img = loadsurf("image/main.suf");
 	btm1_img = loadsurf("image/bottom1.suf");
 	btm2_img = loadsurf("image/bottom2.suf");
 	vaira_title_imag = loadsurf("image/rc_title_bar_vairance.suf");
@@ -277,8 +279,8 @@ void image_load(void){
 	patient_main_icon_img = loadsurf("image/main_icon_care.suf");
 	patient_head_img = loadsurf("image/top_head_wrap_btn_default.suf");
 	patient_head_sel_img = loadsurf("image/top_head_wrap_btn_focused.suf");
-	patient_defec_img = loadsurf("image/top_defecate_btn_default.suf");
-	patient_defec_sel_img = loadsurf("image/top_defecate_btn_focused.suf");
+	patient_defec_img = loadsurf("image/top_meal_btn_default.suf");
+	patient_defec_sel_img = loadsurf("image/top_meal_btn_focused.suf");
 	patient_shift_img = loadsurf("image/top_shift_btn_default.suf");
 	patient_shift_sel_img = loadsurf("image/top_shift_btn_focused.suf");
 	
@@ -356,6 +358,23 @@ void home_proc(void)
 	}
 
 	switch(remocon_key.key_val){
+		case CONFORM_KEY:
+			// 오버레이 화면에서 확인 버튼 → 동작중↔일시정지 토글
+			if(bed_status.run_state == 1) {
+				// 동작 중 → 일시정지
+				U8 tmp = CMD3_PAUSE;
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE, &tmp, 1);
+				conform_key_run = CMD3_RESTART;
+				debugprintf("\n\r HOME: CONFORM -> PAUSE");
+			} else if(bed_status.run_state == 2) {
+				// 일시정지 → 재시작
+				U8 tmp = CMD3_RESTART;
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_RESTART, &tmp, 1);
+				conform_key_run = CMD3_PAUSE;
+				debugprintf("\n\r HOME: CONFORM -> RESUME");
+			}
+			remocon_key.key_val = 0xFF;
+			break;
 		case SET_KEY:// 설정/저장 키를 눌렀다.
 			smart_bed_status.status = MODE_SET_SAVE;
 			remocon_key.key_val = 0xFF;
@@ -365,7 +384,20 @@ void home_proc(void)
 
 void home_draw(void){
 	set_draw_target(getbackframe());
-	draw_surface(home_img, 0, 0);
+	if(bed_status.powered_on) {
+		// 전원 ON: main.suf 배경 + 상태 오버레이
+		// 모드 내 호밍(current_mode != 0 && run_state == 3)도 오버레이 표시
+		// 단독 초기화(current_mode == 0 && run_state == 3)는 부팅 화면
+		if(bed_status.current_mode == 0x00 && bed_status.run_state == 3) {
+			draw_surface(home_img, 0, 0);  // boot.suf: 단독 초기화 중
+		} else {
+			draw_surface(main_img, 0, 0);
+			draw_status_overlay();
+		}
+	} else {
+		// 전원 OFF: boot.suf 배경만
+		draw_surface(home_img, 0, 0);
+	}
 	flip();
 }
 // ========================= HOME End ============================ //

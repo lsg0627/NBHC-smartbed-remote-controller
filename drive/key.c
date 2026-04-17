@@ -18,6 +18,8 @@ extern void spi_wait_finish (int ch);
 REMO_KEY	remocon_key;
 CURSOR	cursor;
 bool power = false;
+static bool posture_up_active = false;
+static bool posture_down_active = false;
 
 void key_init(void){
 	
@@ -194,9 +196,6 @@ void key_read(void){
 
 	// ---- 자세제어 모드: UP/DOWN 누르는 동안 모터 동작, 떼면 정지 ----
 	{
-		static bool posture_up_active = false;
-		static bool posture_down_active = false;
-
 		if(smart_bed_status.status == MODE_POSTURE && power == true){
 			bool up_held = !(remocon_key.current & UP_KEY);
 			bool down_held = !(remocon_key.current & DOWN_KEY);
@@ -354,10 +353,23 @@ void key_read(void){
 			remocon_key.key_val = SET_KEY;
 			return;
 		}
-// 자세제어 (초기화 버튼 → 자세제어 진입)
+// 자세제어 (초기화 버튼 → 자세제어 토글)
 		if(!(remocon_key.current & INIT_KEY)){
-			debugprintf("\n\r KEY : INIT_KEY -> POSTURE");
-			smart_bed_status.status = MODE_POSTURE;
+			if(smart_bed_status.status == MODE_POSTURE) {
+				debugprintf("\n\r KEY : POSTURE -> HOME (send ALL STOP)");
+				// 모드 전환 시 양쪽 모터 무조건 정지 (릴리즈 STOP 실패 대비)
+				U8 tmp = 0;
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
+				posture_up_active = false;
+				posture_down_active = false;
+				smart_bed_status.status = MODE_HOME;
+				smart_bed_display.status = MODE_HOME;
+			} else {
+				debugprintf("\n\r KEY : INIT_KEY -> POSTURE");
+				smart_bed_status.status = MODE_POSTURE;
+			}
+			smart_bed_display.display_refresh = true;
 			remocon_key.key_val = INIT_KEY;
 			return;
 		}
