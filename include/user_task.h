@@ -148,6 +148,7 @@ extern void progress_10ms_condition(void);
 extern void image_load(void);
 extern void load_font(void);
 extern void progress_lcd_display(void);
+extern void save_screenshot(void);
 extern void remocon_power_ctrl(U8 remo_pwr);
 extern void check_stdby_progress(void);
 
@@ -155,4 +156,38 @@ extern bool stdby_in_progress;	// 초기위치 복귀 중 (키 차단)
 extern bool power_off_pending;	// ACK 후 전원 OFF 필요
 extern bool stdby_complete;		// ESP32 ACK 수신 플래그
 extern U32 stdby_timeout;		// 타임아웃 카운터
+
+// 5초 무입력 자동 홈 복귀 타이머 (동작 중 모드 있을 때만 동작)
+extern U32 auto_home_timer;		// 10ms 틱 카운트다운 (50 = 5초)
+
+// 모드명 마퀴 스크롤 (좌측 헤더 박스에서 긴 모드명을 흘려 보여줌)
+extern U32 mode_text_offset;	// 현재 스크롤 오프셋 (px)
+
+// 로컬 상태 잠금 — 사용자 액션 후 ESP32 패킷이 current_mode/run_state를 덮어쓰지 못하게 함
+extern U32 bed_state_lock_remain;	// 100ms 틱 단위 (30 = 3초)
+
+// stdby 시작 시점의 mode 기억 (텍스트 일관성용)
+extern U8 stdby_initial_mode;
+
+// 외부(태블릿) 종료 감지 플래그
+extern bool external_stopping;
+extern U32 external_stopping_timeout;
+extern U32 external_stopping_min_remain;	// 최소 표시 시간
+
+// 모드 시작 ACK 직후 잠시 (false-positive stopping 방지)
+extern bool pending_mode_start;
+extern U32 pending_mode_start_timeout;
+
+// 리모컨 전원 ON 후 첫 BED_STATUS로 침대 상태 확인 후 PWR_ON 조건부 송신
+extern bool pending_pwr_on_check;
+extern U32 pending_pwr_on_check_timeout;
+
+// 마사지 모드 사이클 타이머
+extern U32 massage_timer_elapsed_ms;
+extern U8 massage_timer_mode;
+extern const U32 massage_durations_ms[12];
+
+// VAIRANCE/LEVITATE 모드 경과 시간 타이머
+extern U32 mode_timer_elapsed_ms;
+extern U8  mode_timer_mode;
 

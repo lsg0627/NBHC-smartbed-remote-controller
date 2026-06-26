@@ -20,6 +20,11 @@ CURSOR	cursor;
 bool power = false;
 static bool posture_up_active = false;
 static bool posture_down_active = false;
+// 돌봄케어 모드 조그 상태
+static bool care_up_active = false;
+static bool care_down_active = false;
+static bool care_left_active = false;
+static bool care_right_active = false;
 
 void key_init(void){
 	
@@ -120,11 +125,48 @@ static U32 power_active_frames = 0;	// power_key_active 유지 프레임 수
 void key_read(void){
 	key_proc();
 
+	// 5초 무입력 자동 홈 복귀 타이머 — 어떤 키든 눌리면 리셋
+	if(remocon_key.current != 0xFFFF) {
+		auto_home_timer = 50;	// 50 × 100ms = 5초
+	}
+
 	bool power_pressed = !(remocon_key.current & POWER_KEY);
+	bool set_pressed   = !(remocon_key.current & SET_KEY);
+
+	// ---- 스크린샷 트리거: SET_KEY + POWER_KEY 동시 누름 ----
+	// 노이즈/잡음 false-trigger 방지: 3 사이클 연속으로 combo 확인 후에만 실행
+	{
+		static bool sshot_combo_active = false;
+		static U8 sshot_confirm = 0;
+		if(power_pressed && set_pressed) {
+			if(sshot_confirm < 3) {
+				sshot_confirm++;
+			} else if(!sshot_combo_active) {
+				sshot_combo_active = true;
+				debugprintf("\n\r KEY : SET+POWER -> SCREENSHOT");
+				save_screenshot();
+				power_key_active = false;
+				power_hold_cnt = 0;
+				power_release_cnt = 0;
+				remocon_key.run = true;
+				remocon_key.key_val = 0xFF;
+			}
+			if(sshot_combo_active) return;
+		} else {
+			sshot_confirm = 0;
+			if(sshot_combo_active) {
+				sshot_combo_active = false;
+				power_key_active = false;
+				remocon_key.run = true;
+				remocon_key.key_val = 0xFF;
+				return;
+			}
+		}
+	}
 
 	// ---- 전원 ON 상태: 숏클릭=릴리즈 판별, 롱클릭=즉시 실행 ----
 	if(power == true){
-		// 전원키 누름 감지 → 추적 시작 (stdby 중에도 동작)
+		// 전원키 누름 감지 → 추적 시작 (PRESS 시점엔 stdby_in_progress를 켜지 않음)
 		if(!power_key_active && power_pressed && remocon_key.pushed && !remocon_key.run){
 			power_key_active = true;
 			power_key_long = false;
@@ -132,6 +174,7 @@ void key_read(void){
 			power_hold_cnt = 0;
 			power_active_frames = 0;
 			remocon_key.run = true;	// 다른 키 처리 방지
+			debugprintf("\n\r KEY : POWER PRESS (tracking)");
 		}
 
 		// 독립 홀드 카운터: SPI 원시값 기반, key_proc 리셋 영향 없음
@@ -141,16 +184,16 @@ void key_read(void){
 				power_hold_cnt++;
 				// 롱클릭 판정 → 즉시 종료 루틴 시작
 				if(power_hold_cnt >= LONG_KEY_CNT){
-					debugprintf("\n\r KEY : POWER LONG -> STDBY OFF");
+					debugprintf("\n\r KEY : POWER LONG -> POWER OFF (immediate)");
 					power_key_active = false;
 					power_key_long = true;
 					power_release_cnt = 0;
 					power_hold_cnt = 0;
-					if(!stdby_in_progress){
-						remocon_power_ctrl(REMO_STDBY_OFF);
-					} else {
-						power_off_pending = true;
-					}
+					// 3초 롱클릭 → ACK 대기 없이 즉시 전원 OFF
+					// stdby_in_progress 잔여 플래그 클리어 (혹시 다른 경로로 켜진 경우)
+					stdby_in_progress = false;
+					power_off_pending = false;
+					remocon_power_ctrl(REMO_LCD_OFF);
 					power = false;
 					remocon_key.run = true;
 					return;
@@ -173,17 +216,19 @@ void key_read(void){
 			power_key_active = false;
 			power_release_cnt = 0;
 			power_hold_cnt = 0;
-			// 숏클릭 → STDBY HOME (stdby 중에는 무시)
-			if(!power_key_long && !stdby_in_progress){
+			// 숏클릭(누르고 뗌) → "종료중"/"초기화중" 표시 + STDBY 명령 송신
+			if(!power_key_long){
 				debugprintf("\n\r KEY : POWER SHORT RELEASE -> STDBY HOME");
 				U8 tmp = 0;
+				stdby_in_progress = true;
+				stdby_complete = false;
+				stdby_timeout = 300;	// 30초 fallback
+				stdby_initial_mode = bed_status.current_mode;
+				bed_state_lock_remain = 100;	// 2초 잠금
 				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_STDBY, &tmp, 0);
 				smart_bed_status.status = MODE_HOME;
 				smart_bed_display.display_refresh = true;
-				stdby_in_progress = true;
-				stdby_complete = false;
 				power_off_pending = false;
-				stdby_timeout = 6000;
 			}
 			power_key_long = false;
 			remocon_key.run = true;
@@ -191,8 +236,8 @@ void key_read(void){
 		}
 	}
 
-	// 초기위치 복귀 중이면 나머지 키 입력 차단
-	if(stdby_in_progress) return;
+	// 초기위치 복귀 중에도 키 입력 허용 (위에서 자동 캔슬됨)
+	// if(stdby_in_progress) return;	// 비활성화 — 사용자 키로 stdby 캔슬 가능
 
 	// ---- 자세제어 모드: UP/DOWN 누르는 동안 모터 동작, 떼면 정지 ----
 	{
@@ -208,7 +253,9 @@ void key_read(void){
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_UP, &tmp, 0);
 				if(cursor.type == POSTURE_LEG || cursor.type == POSTURE_ALL)
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_UP, &tmp, 0);
-				debugprintf("\n\r POSTURE: MOTOR UP");
+				if(cursor.type == POSTURE_HEIGHT)
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_UP, &tmp, 0);
+				debugprintf("\n\r POSTURE: MOTOR UP (type=%d)", cursor.type);
 			}
 			// UP 키 뗌 → 모터 정지
 			if(!up_held && posture_up_active){
@@ -217,6 +264,8 @@ void key_read(void){
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
 				if(cursor.type == POSTURE_LEG || cursor.type == POSTURE_ALL)
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
+				if(cursor.type == POSTURE_HEIGHT)
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
 				debugprintf("\n\r POSTURE: MOTOR UP STOP");
 			}
 
@@ -227,7 +276,9 @@ void key_read(void){
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_DOWN, &tmp, 0);
 				if(cursor.type == POSTURE_LEG || cursor.type == POSTURE_ALL)
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_DOWN, &tmp, 0);
-				debugprintf("\n\r POSTURE: MOTOR DOWN");
+				if(cursor.type == POSTURE_HEIGHT)
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_DOWN, &tmp, 0);
+				debugprintf("\n\r POSTURE: MOTOR DOWN (type=%d)", cursor.type);
 			}
 			// DOWN 키 뗌 → 모터 정지
 			if(!down_held && posture_down_active){
@@ -236,6 +287,8 @@ void key_read(void){
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
 				if(cursor.type == POSTURE_LEG || cursor.type == POSTURE_ALL)
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
+				if(cursor.type == POSTURE_HEIGHT)
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
 				debugprintf("\n\r POSTURE: MOTOR DOWN STOP");
 			}
 		} else {
@@ -244,9 +297,87 @@ void key_read(void){
 				U8 tmp = 0;
 				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
 				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
 				posture_up_active = false;
 				posture_down_active = false;
 				debugprintf("\n\r POSTURE: MODE EXIT -> ALL STOP");
+			}
+		}
+	}
+
+	// ---- 돌봄케어 모드: 조그 버튼으로 수동 제어 ----
+	{
+		if(smart_bed_status.status == MODE_PATIENT_CARE && running_flag && power == true){
+			U8 tmp = 0;
+
+			if(cursor.type == PATIENT_HEAD || cursor.type == PATIENT_MEAL){
+				// 머리감기/식사: UP/DOWN 조그 → 바 높이/등판 각도 조절
+				bool up_held = !(remocon_key.current & UP_KEY);
+				bool down_held = !(remocon_key.current & DOWN_KEY);
+
+				if(up_held && !care_up_active){
+					care_up_active = true;
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_UP, &tmp, 0);
+					debugprintf("\n\r CARE JOG: UP");
+				}
+				if(!up_held && care_up_active){
+					care_up_active = false;
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
+					debugprintf("\n\r CARE JOG: UP STOP");
+				}
+				if(down_held && !care_down_active){
+					care_down_active = true;
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_DOWN, &tmp, 0);
+					debugprintf("\n\r CARE JOG: DOWN");
+				}
+				if(!down_held && care_down_active){
+					care_down_active = false;
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
+					debugprintf("\n\r CARE JOG: DOWN STOP");
+				}
+			}
+
+			if(cursor.type == PATIENT_TILT){
+				// 틸팅: LEFT/RIGHT 조그 → 좌우 틸트
+				bool left_held = !(remocon_key.current & LEFT_KEY);
+				bool right_held = !(remocon_key.current & RIGHT_KEY);
+
+				if(left_held && !care_left_active){
+					care_left_active = true;
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_LEFT, &tmp, 0);
+					debugprintf("\n\r CARE JOG: TILT LEFT");
+				}
+				if(!left_held && care_left_active){
+					care_left_active = false;
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_CENTER, &tmp, 0);
+					debugprintf("\n\r CARE JOG: TILT LEFT STOP");
+				}
+				if(right_held && !care_right_active){
+					care_right_active = true;
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_RIGHT, &tmp, 0);
+					debugprintf("\n\r CARE JOG: TILT RIGHT");
+				}
+				if(!right_held && care_right_active){
+					care_right_active = false;
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_CENTER, &tmp, 0);
+					debugprintf("\n\r CARE JOG: TILT RIGHT STOP");
+				}
+			}
+		} else {
+			// 케어 모드 벗어나면 조그 강제 정지
+			if(care_up_active || care_down_active){
+				U8 tmp = 0;
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
+				care_up_active = false;
+				care_down_active = false;
+				debugprintf("\n\r CARE JOG: EXIT -> UP/DOWN STOP");
+			}
+			if(care_left_active || care_right_active){
+				U8 tmp = 0;
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_CENTER, &tmp, 0);
+				care_left_active = false;
+				care_right_active = false;
+				debugprintf("\n\r CARE JOG: EXIT -> LEFT/RIGHT STOP");
 			}
 		}
 	}

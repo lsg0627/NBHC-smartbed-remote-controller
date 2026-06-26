@@ -14,12 +14,101 @@
 
 
 EGL_FONT* g_pFont48;
-//EGL_FONT* g_pFont40;
+EGL_FONT* g_pFont40;
 EGL_FONT* g_pFont32;
 EGL_FONT* g_pFont28;
 EGL_FONT* g_pFont16;
 EGL_FONT* g_pFontKor = NULL;
 EGL_FONT* g_pFontKor16 = NULL;
+
+// 전원 ON 직후 로딩 화면 (boot.suf) 표시 — PDF 슬라이드 3 → 4 전환
+// (process_target_time_handler / home_draw / remocon_power_ctrl 모두 참조)
+bool show_loading_screen = false;
+U32 loading_remain = 0;
+U32 loading_anim_phase = 0;	// 스피너 회전 위상 (0~7)
+
+// 5초 무입력 자동 홈 복귀 타이머
+U32 auto_home_timer = 0;
+
+// 로컬 상태 잠금 — 사용자 키 동작 후 ESP32 패킷이 current_mode/run_state를 덮어쓰지 못하게 함
+// 100ms 틱 단위 (30 = 3초)
+U32 bed_state_lock_remain = 0;
+
+// stdby 시작 시점의 mode 기억 — "종료중" vs "초기화 중" 일관성 유지
+// stdby_initial_mode != 0 → "종료중" (모드 종료 중)
+// stdby_initial_mode == 0 → "초기화 중" (idle 상태에서 전원 누름)
+U8 stdby_initial_mode = 0;
+
+// 외부(태블릿) 종료 감지 — ESP32 BED_STATUS의 state 전환으로 detect
+// state 1/2 → state 0/3 전환 시 set, mode=0/state=0 안정 시 clear
+bool external_stopping = false;
+U32 external_stopping_timeout = 0;		// 100ms 틱 단위 (200 = 20초 안전 timeout)
+U32 external_stopping_min_remain = 0;	// 최소 표시 시간 (clear 방지)
+
+// 모드 시작 ACK 직후 → state=3 transient를 stopping으로 잘못 감지하는 것 방지
+bool pending_mode_start = false;
+U32 pending_mode_start_timeout = 0;	// 100ms 틱 단위
+
+// 리모컨 전원 ON 직후 → 첫 BED_STATUS로 침대 상태 확인 후 CMD2_PWR_ON 송신 여부 결정
+// idle(state=0)이면 CMD2_PWR_ON 송신 (ESP32에서 1.mp3 + 홈 복귀 루틴 수행)
+// running/paused이면 송신 안 함 (태블릿 동작 모드 유지)
+bool pending_pwr_on_check = false;
+U32 pending_pwr_on_check_timeout = 0;	// 100ms 틱 단위 (30 = 3초)
+
+// CMD2_PWR_ON 송신 후 ESP32의 state=3 (호밍 시작) BED_STATUS 도착 대기
+// 도착 전까지 로딩 스피너 유지 → 빈 home 화면 노출 방지
+bool awaiting_homing_start = false;
+U32 awaiting_homing_timeout = 0;	// 100ms 틱 단위 (50 = 5초)
+
+// 마사지 모드 사이클 타이머 (1회 측정 시간 기준, 한 사이클 끝나면 wrap)
+U32 massage_timer_elapsed_ms = 0;	// 누적 ms (100ms 틱마다 +100)
+U8 massage_timer_mode = 0xFF;		// 0~11: 마사지 인덱스, 0xFF: 비활성
+
+// VAIRANCE/LEVITATE 모드 경과 시간 (HOME 시간 박스에 카운트업 표시)
+// 새 시작(state=0→1 또는 mode 변경) 시 리셋, state=1 동안만 누적
+U32 mode_timer_elapsed_ms = 0;
+U8  mode_timer_mode = 0;	// 현재 추적 중인 mode 코드 (0 = 비활성)
+
+// 1회 사이클 시간 (ms) — 실측치
+const U32 massage_durations_ms[12] = {
+	779000,	// 0: 파도타기 (12:59)
+	766572,	// 1: 지압 (12:46)
+	991288,	// 2: 집중 (16:31)
+	1129528,	// 3: 추나 (18:49)
+	717511,	// 4: 스트레칭 (11:57)
+	675432,	// 5: 트위스트 (11:15)
+	336304,	// 6: 트렌델렌버그 (5:36)
+	1093265,	// 7: 롤링 (18:13)
+	488301,	// 8: 호흡 (8:08)
+	1014757,	// 9: 시소 (16:54)
+	421573,	// 10: 무중력 (7:01)
+	565385,	// 11: 수면 (9:25)
+};
+
+// 모드명 마퀴 스크롤 상태 (홈 화면 좌측 박스, 동작 중 모드명이 길 때)
+U32 mode_text_offset = 0;	// 현재 스크롤 오프셋 (픽셀)
+U32 mode_text_pause = 0;	// 끝 도달 후 일시정지 카운트 (1초 = 10틱)
+U32 mode_text_width = 0;	// 현재 모드명 폭 (캐시)
+U8  mode_text_last_mode = 0xFF;	// 모드 변경 감지용
+U8  mode_text_last_state = 0xFF;	// 상태 변경 감지용 (동작중/일시정지/종료 전환)
+bool mode_text_last_stdby = false;	// stdby_in_progress 변경 감지용
+bool mode_text_last_external_stopping = false;	// external_stopping 변경 감지용
+bool mode_text_scrolling = false;	// 스크롤 필요 여부
+
+// 모드명 텍스트 폭 추정 (g_pFontKor: 한글=28px, ASCII=14px)
+U32 estimate_text_width_28(const char* utf8_str)
+{
+	U32 width = 0;
+	int i = 0;
+	while(utf8_str[i]) {
+		U8 c = (U8)utf8_str[i];
+		if(c < 0x80)            { width += 14; i += 1; }
+		else if((c & 0xE0) == 0xC0) { width += 28; i += 2; }
+		else if((c & 0xF0) == 0xE0) { width += 28; i += 3; }
+		else                    { i += 1; }
+	}
+	return width;
+}
 //VAIRANCE_ST vairance;
 //VAIRANCE_ST vairance_temp;
 
@@ -105,6 +194,217 @@ void process_target_time_handler(void){
 		//progress_10ms_condition();
 		if(esp32_get_infomation.get_info_time)
 			esp32_get_infomation.get_info_time--;
+
+		// 로딩 화면 카운트다운 + 스피너 회전
+		// 다음 중 하나면 스피너 표시:
+		//   1) show_loading_screen (초기 3초 로딩)
+		//   2) ESP32 호밍 중 (state=3)
+		//   3) CMD2_PWR_ON 송신 후 state=3 도착 대기 중 (awaiting_homing_start)
+		{
+			bool homing_in_progress = (power &&
+				bed_status.current_mode == 0 && bed_status.run_state == 3);
+			bool spinner_shown = show_loading_screen || homing_in_progress || awaiting_homing_start;
+			if(show_loading_screen && loading_remain > 0){
+				loading_remain--;
+				if(loading_remain == 0){
+					show_loading_screen = false;
+				}
+			}
+			// awaiting_homing_start 타임아웃 (state=3가 안 와도 5초 후 해제)
+			if(awaiting_homing_start){
+				if(homing_in_progress){
+					// state=3 확인됨 — 이후엔 homing_in_progress 조건으로 유지
+					awaiting_homing_start = false;
+				} else if(awaiting_homing_timeout > 0){
+					awaiting_homing_timeout--;
+					if(awaiting_homing_timeout == 0){
+						awaiting_homing_start = false;
+					}
+				}
+			}
+			if(spinner_shown){
+				loading_anim_phase = (loading_anim_phase + 1) & 7;
+				smart_bed_display.display_refresh = true;
+			}
+		}
+
+		// stdby 타임아웃 카운트다운 (100ms 틱 기준 → 정확한 초 단위)
+		if(stdby_in_progress && stdby_timeout > 0){
+			stdby_timeout--;
+		}
+
+		// 로컬 상태 잠금 카운트다운 (100ms 틱)
+		if(bed_state_lock_remain > 0){
+			bed_state_lock_remain--;
+		}
+
+		// 외부 종료중 — 최소 표시 시간 decay
+		if(external_stopping && external_stopping_min_remain > 0){
+			external_stopping_min_remain--;
+			if(external_stopping_min_remain == 0 &&
+			   bed_status.current_mode == 0 && bed_status.run_state == 0){
+				// 최소 시간 경과 + 안정 상태 → clear
+				external_stopping = false;
+				smart_bed_display.display_refresh = true;
+			}
+		}
+		// 외부 종료중 안전 timeout
+		if(external_stopping && external_stopping_timeout > 0){
+			external_stopping_timeout--;
+			if(external_stopping_timeout == 0){
+				external_stopping = false;
+				smart_bed_display.display_refresh = true;
+			}
+		}
+
+		// pending_mode_start 카운트다운 — timeout(15초)까지 유지
+		// 자동 settle 감지(mode!=0 && state==1)는 제거 — 모드 시작 후 ESP32가
+		// 호밍(state=3)을 거칠 수 있으므로 state=1로 일찍 settle 처리하면
+		// 이후 state=3 transition을 "종료중"으로 오감지함
+		if(pending_mode_start && pending_mode_start_timeout > 0){
+			pending_mode_start_timeout--;
+			if(pending_mode_start_timeout == 0){
+				pending_mode_start = false;
+			}
+		}
+
+		// pending_pwr_on_check: REMO_PWR_ON에서 즉시 결정하도록 변경됨 (fallback 불필요)
+
+		// VAIRANCE/LEVITATE 모드 경과 시간 타이머
+		//  - state=1 (동작 중): 100ms씩 누적. 새 시작이면 0으로 리셋.
+		//  - state=2 (일시정지): 값 유지
+		//  - state=0/3 (정지/초기화), stdby_in_progress, 비-VAIRANCE/LEVITATE 모드:
+		//    → 즉시 00:00으로 리셋
+		{
+			static U8 prev_mode_for_etimer = 0;
+			static U8 prev_state_for_etimer = 0xFF;
+			U8 m = bed_status.current_mode;
+			U8 s = bed_status.run_state;
+			bool is_vair_or_levit = (m == 0x20 || m == 0x10 || m == 0x11 || m == 0x12);
+			if(is_vair_or_levit && s == 1 && !stdby_in_progress) {
+				U32 prev_sec, new_sec;
+				bool fresh_start = (prev_state_for_etimer != 1) ||
+					(prev_mode_for_etimer != m);
+				if(fresh_start || mode_timer_mode != m) {
+					mode_timer_mode = m;
+					mode_timer_elapsed_ms = 0;
+				}
+				prev_sec = mode_timer_elapsed_ms / 1000;
+				mode_timer_elapsed_ms += 100;
+				new_sec = mode_timer_elapsed_ms / 1000;
+				if(new_sec != prev_sec) {
+					smart_bed_display.display_refresh = true;
+				}
+			} else if(is_vair_or_levit && s == 2) {
+				// 일시정지 — 값 유지 (재시작 시 이어서 카운트)
+			} else {
+				// 종료(state=0) / 초기화(state=3) / stdby / 다른 모드 → 00:00 리셋
+				if(mode_timer_mode != 0 || mode_timer_elapsed_ms != 0) {
+					mode_timer_mode = 0;
+					mode_timer_elapsed_ms = 0;
+					smart_bed_display.display_refresh = true;
+				}
+			}
+			prev_state_for_etimer = s;
+			prev_mode_for_etimer = m;
+		}
+
+		// 체압 매트리스는 ESP32 sensor_user_task가 항상 송신.
+		// 모드/종료/초기화 상태와 무관하게 리모컨은 받은 데이터를 그대로 표시.
+
+		// 마사지 화면 슬라이드 — 휠 회전 느낌
+		// 90px → 0, easing처럼 처음엔 빠르고 끝에 느려지는 효과
+		// (값이 클수록 큰 step, 작아질수록 작은 step)
+		{
+			extern int massage_anim_offset;
+			int abs_v = massage_anim_offset > 0 ? massage_anim_offset : -massage_anim_offset;
+			if(abs_v > 0) {
+				int step = abs_v / 3 + 2;	// easing: 30→12→6→4→2→0 같은 감속
+				if(massage_anim_offset > 0){
+					massage_anim_offset -= step;
+					if(massage_anim_offset < 0) massage_anim_offset = 0;
+				} else {
+					massage_anim_offset += step;
+					if(massage_anim_offset > 0) massage_anim_offset = 0;
+				}
+				smart_bed_display.display_refresh = true;
+			}
+		}
+
+		// 5초 무입력 자동 홈 복귀 — 동작 중 모드가 있을 때 비-홈 화면이면 카운트다운
+		// 종료 / 낙상경고 화면은 제외 (사용자 응답 필요)
+		if(power && !show_loading_screen &&
+		   smart_bed_status.status != MODE_HOME &&
+		   smart_bed_status.status != MODE_SHUTDOWN &&
+		   smart_bed_status.status != MODE_FALL_ALERT &&
+		   (bed_status.run_state == 1 || bed_status.run_state == 2)) {
+			if(auto_home_timer > 0) {
+				auto_home_timer--;
+				if(auto_home_timer == 0) {
+					debugprintf("\n\r AUTO HOME: 5sec idle -> MODE_HOME");
+					smart_bed_status.status = MODE_HOME;
+					smart_bed_display.display_refresh = true;
+				}
+			}
+		}
+
+		// 모드명/상태 마퀴 스크롤 — status 박스를 가진 화면에서 텍스트가 박스를 초과할 때 스크롤
+		// 동작중 / 일시정지 / 종료중 / 초기화중(stdby) 모두 처리
+		// HOME 외에 VAIRANCE/LEVITATE/MASSAGE/CARE 화면도 동일 박스를 가지므로 스크롤 유지
+		if(power && !show_loading_screen &&
+		   (smart_bed_status.status == MODE_HOME ||
+		    smart_bed_status.status == MODE_VAIRANCE ||
+		    smart_bed_status.status == MODE_LEVITATE ||
+		    smart_bed_status.status == MODE_MASSAGE ||
+		    smart_bed_status.status == MODE_PATIENT_CARE)) {
+			// 모드/상태/stdby 변경 감지 → 폭 재계산 + 스크롤 리셋
+			if(mode_text_last_mode != bed_status.current_mode ||
+			   mode_text_last_state != bed_status.run_state ||
+			   mode_text_last_stdby != stdby_in_progress ||
+			   mode_text_last_external_stopping != external_stopping) {
+				debugprintf("\n\r [DISP] mode=0x%02x state=%d stdby=%d ext_stop=%d -> \"%s\"",
+					bed_status.current_mode, bed_status.run_state,
+					stdby_in_progress, external_stopping,
+					get_mode_status_text(bed_status.current_mode, bed_status.run_state));
+				mode_text_last_mode = bed_status.current_mode;
+				mode_text_last_state = bed_status.run_state;
+				mode_text_last_stdby = stdby_in_progress;
+				mode_text_last_external_stopping = external_stopping;
+				mode_text_width = estimate_text_width_28(
+					get_mode_status_text(bed_status.current_mode, bed_status.run_state));
+				mode_text_offset = 0;
+				mode_text_pause = 0;
+				// 텍스트 영역(x=32~140, 폭 108)보다 길면 스크롤
+				mode_text_scrolling = (mode_text_width > 108);
+				smart_bed_display.display_refresh = true;	// 텍스트 변경 → 재그리기
+			}
+			// 스크롤 진행
+			if(mode_text_scrolling) {
+				U32 target = (mode_text_width > 108) ? (mode_text_width - 108 + 4) : 0;
+				if(mode_text_pause > 0) {
+					mode_text_pause--;
+					if(mode_text_pause == 0) {
+						mode_text_offset = 0;	// 처음으로 리셋
+					}
+				} else {
+					mode_text_offset += 2;	// 2px/tick = ~20px/sec
+					if(mode_text_offset >= target) {
+						mode_text_offset = target;
+						mode_text_pause = 10;	// 1초 (10 × 100ms)
+					}
+				}
+				smart_bed_display.display_refresh = true;	// 매 틱 재그리기
+			}
+		} else {
+			// 비-홈이면 스크롤 상태 리셋
+			if(mode_text_last_mode != 0xFF) {
+				mode_text_last_mode = 0xFF;
+				mode_text_last_state = 0xFF;
+				mode_text_last_stdby = false;
+				mode_text_offset = 0;
+				mode_text_scrolling = false;
+			}
+		}
 	}
 	// if(time_100msec_interval_get(pDC->target_time.tmout_100msec) > 1){
 		// pDC->target_time.tmout_100msec = *((volatile unsigned int*)TMCNT_ADDR(SYS_TIMER_CH));// get timer count
@@ -323,9 +623,12 @@ void image_load(void){
 void load_font(void){
 	g_pFont28 = create_bmpfont("image/font/font28.fnt");// font load
 	bmpfont_setautokerning(g_pFont28, true);// false : 문자간격 고정, true: 문자비율에 맞게 표시
-	
+
 	g_pFont16 = create_bmpfont("image/font/font16.fnt");// font load
 	bmpfont_setautokerning(g_pFont16, true);// false : 문자간격 고정, true: 문자비율에 맞게 표시
+
+	g_pFont40 = create_bmpfont("image/font/font40.fnt");// HOME 시간 박스용 (큰 숫자)
+	bmpfont_setautokerning(g_pFont40, true);
 
 	// 한글 폰트 (SDK 내장 bitfont)
 	g_pFontKor = create_bitfont();
@@ -364,12 +667,18 @@ void home_proc(void)
 				// 동작 중 → 일시정지
 				U8 tmp = CMD3_PAUSE;
 				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE, &tmp, 1);
+				bed_status.run_state = 2;	// 즉시 상태 반영
+				bed_state_lock_remain = 100;	// 3초 잠금
+				smart_bed_display.display_refresh = true;
 				conform_key_run = CMD3_RESTART;
 				debugprintf("\n\r HOME: CONFORM -> PAUSE");
 			} else if(bed_status.run_state == 2) {
 				// 일시정지 → 재시작
 				U8 tmp = CMD3_RESTART;
 				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_RESTART, &tmp, 1);
+				bed_status.run_state = 1;	// 즉시 상태 반영
+				bed_state_lock_remain = 100;	// 3초 잠금
+				smart_bed_display.display_refresh = true;
 				conform_key_run = CMD3_PAUSE;
 				debugprintf("\n\r HOME: CONFORM -> RESUME");
 			}
@@ -384,19 +693,21 @@ void home_proc(void)
 
 void home_draw(void){
 	set_draw_target(getbackframe());
-	if(bed_status.powered_on) {
-		// 전원 ON: main.suf 배경 + 상태 오버레이
-		// 모드 내 호밍(current_mode != 0 && run_state == 3)도 오버레이 표시
-		// 단독 초기화(current_mode == 0 && run_state == 3)는 부팅 화면
-		if(bed_status.current_mode == 0x00 && bed_status.run_state == 3) {
-			draw_surface(home_img, 0, 0);  // boot.suf: 단독 초기화 중
-		} else {
-			draw_surface(main_img, 0, 0);
-			draw_status_overlay();
-		}
-	} else {
-		// 전원 OFF: boot.suf 배경만
+	if(!power) {
+		// 전원 OFF
 		draw_surface(home_img, 0, 0);
+	} else if(show_loading_screen || awaiting_homing_start ||
+			(bed_status.current_mode == 0x00 && bed_status.run_state == 3)) {
+		// 로딩 화면 + 스피너 — 다음 중 하나일 때:
+		//   1) 초기 3초 부팅 로딩
+		//   2) CMD2_PWR_ON 후 ESP32 state=3 도착 대기
+		//   3) ESP32 호밍 진행 중
+		draw_surface(home_img, 0, 0);
+		draw_loading_spinner(160, 240, loading_anim_phase);
+	} else {
+		// PDF 슬라이드 4 — 단색 배경 + 4영역 오버레이
+		draw_rectfill(0, 0, 320, 480, MAKE_COLORREF(20, 25, 38));
+		draw_status_overlay();
 	}
 	flip();
 }
@@ -433,6 +744,7 @@ bool stdby_in_progress = false;	// 초기위치 복귀 중 (키 차단)
 bool power_off_pending = false;	// ACK 후 전원 OFF 필요
 bool stdby_complete = false;	// ESP32 ACK 수신 플래그
 U32 stdby_timeout = 0;			// 타임아웃 카운터
+// show_loading_screen / loading_remain 은 파일 상단(g_pFont 영역)에 정의됨
 
 void remocon_power_ctrl(U8 remo_pwr)
 {
@@ -441,20 +753,29 @@ void remocon_power_ctrl(U8 remo_pwr)
 	switch(remo_pwr)
 	{
 		case REMO_PWR_ON:	// 전원 ON (클릭)
-			if(remo_pwr_st == REMO_PWR_ON){
-				// 최초 부팅: 초기화 루틴 수행
+			// CMD2_PWR_ON은 ESP32의 run_power(PowerOn)을 트리거 → 1.mp3 재생 + 홈 복귀 루틴.
+			// 리모컨 OFF 상태에서도 main loop가 BED_STATUS를 계속 수신하여 bed_status는 최신 상태.
+			// 침대가 idle(mode=0 && state=0)일 때만 CMD2_PWR_ON 송신.
+			// 동작 중(mode≠0, state=1/2) 또는 초기화 중(state=3)이면 송신 안 함 → 동작 유지.
+			if(bed_status.current_mode == 0 && bed_status.run_state == 0){
+				debugprintf("\n\r [PWR_ON] bed idle -> send CMD2_PWR_ON");
 				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PWR_ON, &tmp, 0);
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_INIT, &tmp, 0);
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_STDBY, &tmp, 0);
+				awaiting_homing_start = true;
+				awaiting_homing_timeout = 50;	// 5초 fallback
 			} else {
-				// LCD OFF → ON 복귀
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PWR_ON, &tmp, 0);
+				debugprintf("\n\r [PWR_ON] bed running (mode=0x%02x state=%d) -> skip PWR_ON",
+					bed_status.current_mode, bed_status.run_state);
 			}
+			pending_pwr_on_check = false;
+			pending_pwr_on_check_timeout = 0;
 			remo_pwr_st = REMO_LCD_ON;
 			smart_bed_status.status = MODE_HOME;
 			smart_bed_display.display_refresh = true;
 			stdby_in_progress = false;
 			power_off_pending = false;
+			// PDF 슬라이드 3: 로딩 화면 (boot.suf) 표시 → 약 3초 후 자동 홈 전환
+			show_loading_screen = true;
+			loading_remain = 30;	// process_target_time_handler 틱 기준 (~3초)
 			LCD_ON();
 			break;
 
@@ -490,6 +811,11 @@ void check_stdby_progress(void)
 		debugprintf("\n\r STDBY ACK RECEIVED");
 		stdby_in_progress = false;
 		stdby_complete = false;
+		// 종료 완료 — 즉시 mode/state 클리어 + 잠금으로 ESP32 잔여 패킷 무시
+		bed_status.current_mode = 0;
+		bed_status.run_state = 0;
+		bed_state_lock_remain = 100;	// 2초 잠금 (다음 ESP32 패킷이 정상 0이라 확신될 때까지)
+		smart_bed_display.display_refresh = true;	// "종료중/초기화중" → "대기중" 전환 표시
 
 		if(power_off_pending){
 			// 롱클릭 → 전원 OFF
@@ -498,16 +824,17 @@ void check_stdby_progress(void)
 			power = false;
 			power_off_pending = false;
 		}
-		// 숏클릭 → 키 입력 재개 (stdby_in_progress=false로 이미 해제)
 		return;
 	}
 
-	if(stdby_timeout > 0){
-		stdby_timeout--;
-	} else {
-		// 타임아웃: 강제 해제
+	// 타임아웃 (시간 기반 — 100ms 틱 핸들러에서 감소됨)
+	if(stdby_timeout == 0){
 		debugprintf("\n\r STDBY TIMEOUT");
 		stdby_in_progress = false;
+		bed_status.current_mode = 0;
+		bed_status.run_state = 0;
+		bed_state_lock_remain = 100;
+		smart_bed_display.display_refresh = true;
 		if(power_off_pending){
 			remocon_power_ctrl(REMO_LCD_OFF);
 			power = false;
@@ -626,4 +953,86 @@ void progress_lcd_display(void){
 		smart_bed_display.display_refresh = false;
 	}
 
+}
+
+// ========================= Screenshot ============================ //
+//
+// SET_KEY + POWER_KEY 동시 누름 시 현재 화면을 FAT(0:/screenshot/) 폴더에
+// SHOT_NNN.BMP (24-bit BMP) 형식으로 저장.
+//
+#include "fatfs/ff.h"
+
+static int screenshot_counter = 0;
+
+// RGB565 → 24-bit BMP 저장 (front frame 캡쳐)
+void save_screenshot(void){
+	FIL fp;
+	FRESULT res;
+	UINT wb;
+	SURFACE *surf;
+	int w, h, row_size, pixel_data_size, file_size;
+	int x, y;
+	U8 hdr[14];
+	U8 dib[40];
+	static U8 row_buf[320 * 3];	// 320 px × 3 bytes = 960 bytes
+	char path[40];
+
+	surf = getfrontframe();
+	if(!surf) return;
+	w = 320; h = 480;	// 알려진 LCD 해상도
+	row_size = w * 3;	// 24-bit, 320*3=960 (4-byte align 됨)
+	pixel_data_size = row_size * h;
+	file_size = 54 + pixel_data_size;
+
+	// screenshot 폴더 생성 (이미 있으면 무시)
+	f_mkdir("0:/screenshot");
+
+	sprintf(path, "0:/screenshot/SHOT_%03d.BMP", screenshot_counter);
+	screenshot_counter = (screenshot_counter + 1) % 1000;
+
+	res = f_open(&fp, path, FA_WRITE | FA_CREATE_ALWAYS);
+	if(res != FR_OK) {
+		debugprintf("\n\r screenshot: f_open failed %d", res);
+		return;
+	}
+
+	// BMP file header (14 bytes)
+	hdr[0]='B'; hdr[1]='M';
+	hdr[2] = (U8)(file_size & 0xFF);
+	hdr[3] = (U8)((file_size >> 8) & 0xFF);
+	hdr[4] = (U8)((file_size >> 16) & 0xFF);
+	hdr[5] = (U8)((file_size >> 24) & 0xFF);
+	hdr[6]=0; hdr[7]=0; hdr[8]=0; hdr[9]=0;	// reserved
+	hdr[10]=54; hdr[11]=0; hdr[12]=0; hdr[13]=0;	// data offset
+	f_write(&fp, hdr, 14, &wb);
+
+	// DIB header (BITMAPINFOHEADER, 40 bytes)
+	memset(dib, 0, 40);
+	dib[0]=40;
+	dib[4] = (U8)(w & 0xFF); dib[5] = (U8)((w >> 8) & 0xFF);
+	dib[8] = (U8)(h & 0xFF); dib[9] = (U8)((h >> 8) & 0xFF);
+	dib[12]=1;	// planes
+	dib[14]=24;	// bpp
+	dib[20] = (U8)(pixel_data_size & 0xFF);
+	dib[21] = (U8)((pixel_data_size >> 8) & 0xFF);
+	dib[22] = (U8)((pixel_data_size >> 16) & 0xFF);
+	dib[23] = (U8)((pixel_data_size >> 24) & 0xFF);
+	f_write(&fp, dib, 40, &wb);
+
+	// Pixel data — BMP는 bottom-up 저장
+	for(y = h - 1; y >= 0; y--) {
+		for(x = 0; x < w; x++) {
+			U16 *p16 = GETPOINT16(surf, x, y);
+			U16 p = *p16;
+			U8 r = (U8)(((p >> 11) & 0x1F) << 3);
+			U8 g = (U8)(((p >> 5) & 0x3F) << 2);
+			U8 b = (U8)((p & 0x1F) << 3);
+			row_buf[x*3 + 0] = b;	// BMP는 BGR 순서
+			row_buf[x*3 + 1] = g;
+			row_buf[x*3 + 2] = r;
+		}
+		f_write(&fp, row_buf, row_size, &wb);
+	}
+	f_close(&fp);
+	debugprintf("\n\r screenshot saved: %s", path);
 }

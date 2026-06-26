@@ -62,7 +62,7 @@ extern U8 body_set_max[BODY_LEVIT_MAX];
 enum{
 	PATIENT_HEAD = 0,// 머리감기
 	PATIENT_MEAL,	// 식사
-	PATIENT_SHIFT,		// 이동
+	PATIENT_TILT,	// 틸팅
 };
 
 
@@ -78,11 +78,16 @@ typedef struct _body
 extern U8 bar[MAX_BAR];
 extern bool body_info;
 extern U8 pressure_map[PRESSURE_ROWS][PRESSURE_COLS];
+extern S16 motor_positions[12];	// ESP32에서 받은 12 모터 위치 (0~3400)
+
+extern U32 pressure_to_color(U8 value);
+extern int motor_position_to_offset(S16 pos);
 
 extern BODY levitate[LEVIT_MAX];// 교대 부양(일반/집중/수면)
 extern BODY dispersion;// 체압분산
 extern BODY massage[12];	// 마사지
 extern int running_massage_type;	// 현재 동작 중인 마사지 (-1: 없음, 0~11)
+extern bool running_flag;			// 돌봄케어 동작 중 플래그
 extern BODY patient_care[3];
 extern BODY heag;
 extern BODY temp_body;
@@ -114,6 +119,7 @@ enum {
 	POSTURE_BACK = 0,	// 등판
 	POSTURE_LEG,		// 다리판
 	POSTURE_ALL,		// 등/다리
+	POSTURE_HEIGHT,		// 높이
 	POSTURE_TYPE_MAX
 };
 
@@ -122,4 +128,12 @@ extern void posture_draw(void);
 
 // 상태 오버레이 (홈 화면 등에서 호출)
 extern void draw_status_overlay(void);
+
+// 로딩 스피너 (전원 ON 직후 부팅 화면 위에 그림)
+extern void draw_loading_spinner(int cx, int cy, U32 phase);
+
+// 모드 코드 → 기본 이름만 (예: "파도타기")
+extern const char* get_mode_name(U8 mode);
+// 모드 + 상태 → 풀 텍스트 (예: "파도타기 일시정지" / "초기화 중")
+extern const char* get_mode_status_text(U8 mode, U8 state);
 

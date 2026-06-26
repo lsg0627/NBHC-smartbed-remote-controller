@@ -5,11 +5,14 @@
 
 U8 conform_key_run = 0;
 int running_massage_type = -1;	// 현재 동작 중인 마사지 (-1: 없음, 0~11: 마사지 번호)
+// 마사지 화면 스크롤 애니메이션 — UP/DOWN 누르면 카드 슬라이드
+int massage_anim_offset = 0;	// 현재 슬라이드 오프셋 (±60 → 0으로 decay)
 BED_STATUS_DATA bed_status = {0};  // 침대 상태 (ESP32에서 2초 주기 수신)
 U8 body_set_max[BODY_LEVIT_MAX] = {0,};
 U8 bar[16] = {0,};
 bool body_info = false;
 U8 pressure_map[PRESSURE_ROWS][PRESSURE_COLS] = {{0,}};
+S16 motor_positions[12] = {0,};	// ESP32에서 받은 12 모터 위치 (raw pulses, 0~3400)
 BODY levitate[LEVIT_MAX];// 교대 부양(일반/집중/수면)
 BODY dispersion;// 체압분산
 BODY massage[12];	// 마사지
@@ -108,118 +111,364 @@ void show_shutdown_screen(void)
 // 공통 상태 오버레이: 화면 상단(타이틀 아래)에 현재 동작 상태 표시
 // dispersion_draw, levitate_draw, massage_draw 등에서 호출
 // ---------------------------------------------------------------------------
-static const char* get_mode_name(U8 mode) {
-	static char massage_buf[16];
+// 모드 코드 → 기본 이름만 (상태 접미사 제외)
+const char* get_mode_name(U8 mode) {
+	static char buf[24];
 	switch(mode) {
-		case 0x00: return "대기 중";
+		case 0x00: return "";
 		case 0x10: return "교대부양 표준";
 		case 0x11: return "교대부양 집중";
 		case 0x12: return "교대부양 수면";
 		case 0x20: return "체압분산";
 		case 0x40: return "머리감기";
 		case 0x41: return "배변";
-		case 0x4B: return "식사 모드";
+		case 0x4B: return "식사";
 		case 0x4C: return "수평 복귀";
 		case 0x4D: return "무중력";
+		case 0x4E: return "틸팅";
+		case 0x31: return "파도타기";
+		case 0x32: return "지압";
+		case 0x33: return "집중";
+		case 0x34: return "추나";
+		case 0x35: return "스트레칭";
+		case 0x36: return "트위스트";
+		case 0x37: return "트렌델렌버그";
+		case 0x38: return "롤링";
+		case 0x39: return "호흡";
+		case 0x3A: return "시소";
+		case 0x3B: return "무중력";
+		case 0x3C: return "수면";
 		default:
-			if(mode >= 0x31 && mode <= 0x3C) {
-				sprintf(massage_buf, "마사지(%d)", mode - 0x30);
-				return massage_buf;
-			}
-			return "";
+			sprintf(buf, "모드(0x%02X)", mode);
+			return buf;
 	}
 }
 
-static const char* get_state_name(U8 state) {
-	switch(state) {
-		case 0: return "";
-		case 1: return "동작 중";
-		case 2: return "일시정지";
-		case 3: return "초기화 중";
-		default: return "";
+// 모드 + 상태 → 풀 텍스트
+// stdby_in_progress=true: 사용자 전원 버튼 (로컬)
+//   stdby_initial_mode != 0 → "종료중", == 0 → "초기화 중"
+// external_stopping=true: 태블릿 등 외부에서 종료 시작 → "종료중"
+// 그 외:
+//   state 1 + mode!=0 → "[mode] 동작중"
+//   state 2 + mode!=0 → "[mode] 일시정지"
+//   else → "대기중"
+const char* get_mode_status_text(U8 mode, U8 state) {
+	static char buf[64];
+	const char* name;
+	if(stdby_in_progress) {
+		if(stdby_initial_mode == 0) return "초기화 중";
+		return "종료중";
+	}
+	if(external_stopping) return "종료중";
+	if(mode != 0 && state == 1) {
+		name = get_mode_name(mode);
+		sprintf(buf, "%s 동작중", name);
+		return buf;
+	}
+	if(mode != 0 && state == 2) {
+		name = get_mode_name(mode);
+		sprintf(buf, "%s 일시정지", name);
+		return buf;
+	}
+	return "대기중";
+}
+
+// 압력값(0~255) → 색상 변환 (정의는 파일 하단). draw_status_overlay에서 사용.
+extern U32 pressure_to_color(U8 value);
+
+// ---------------------------------------------------------------------------
+// 아이콘 헬퍼 (PDF 홈화면용 작은 픽토그램)
+// ---------------------------------------------------------------------------
+
+// 플레이 + 정지 합친 아이콘 ▶❚ (대기 상태 등 기본)
+static void draw_play_icon(int x, int y, int size, U32 color)
+{
+	int i;
+	int tri_w = (size + 1) / 2;
+	int bar_w = 3;
+	for(i = 0; i < tri_w; i++) {
+		int h = size - 2 * i;
+		if(h <= 0) break;
+		draw_rectfill(x + i, y + i, 1, h, color);
+	}
+	draw_rectfill(x + size - bar_w, y, bar_w, size, color);
+}
+
+// 일시정지 아이콘 ‖ — 총 너비 = size (대기중 ▶❚와 동일)
+// 막대 폭 size/3, 갭 size/3 → 2*(size/3) + size/3 = size
+static void draw_pause_icon(int x, int y, int size, U32 color)
+{
+	int bar_w = size / 3; if(bar_w < 2) bar_w = 2;
+	int gap = size - 2 * bar_w;
+	draw_rectfill(x, y, bar_w, size, color);
+	draw_rectfill(x + bar_w + gap, y, bar_w, size, color);
+}
+
+// 재생 아이콘 ▶ (일시정지 상태) — 18px 너비 (다른 아이콘과 동일)
+static void draw_triangle_icon(int x, int y, int size, U32 color)
+{
+	int i;
+	int steps = (size + 1) / 2;
+	for(i = 0; i < steps; i++) {
+		int h = size - 2 * i;
+		if(h <= 0) break;
+		draw_rectfill(x + i * 2, y + i, 2, h, color);	// 2px 폭 × 9단계 = 18 폭
 	}
 }
 
-static const char* get_heat_name(U8 level) {
-	switch(level) {
-		case 0: return "OFF";
-		case 1: return "약";
-		case 2: return "중";
-		case 3: return "강";
-		default: return "-";
+// 온도계 아이콘 (큰 사이즈, 12w × 27h)
+static void draw_thermo_icon(int x, int y, U32 color)
+{
+	draw_roundrectfill(x + 1, y + 17, 10, 10, 5, color);	// 구근 (10×10)
+	draw_rectfill(x + 4, y, 4, 19, color);					// 스템 (4×19)
+}
+
+// 스피커 아이콘 (큰 사이즈, 14w × 25h, 콘텐츠 y+1~y+25)
+static void draw_speaker_icon(int x, int y, U32 color)
+{
+	int i;
+	draw_rectfill(x, y + 8, 6, 10, color);					// 본체 (6×10)
+	for(i = 0; i < 8; i++) {
+		draw_rectfill(x + 6 + i, y + 8 - i, 1, 10 + 2 * i, color);	// 콘
 	}
 }
 
+// 로딩 스피너 — 8 dots 원형, 위상에 따라 밝기 그라데이션으로 회전 표현
+// phase: 0~7 — 가장 밝은 dot의 인덱스
+void draw_loading_spinner(int cx, int cy, U32 phase)
+{
+	int r = 25;	// 반지름
+	int sz = 7;	// dot 크기
+	// 8 위치(시계방향, 12시 시작): radius=25, 대각선 ≈ 25*0.707 ≈ 17
+	int dx[8] = {  0, 17, 25, 17,  0,-17,-25,-17};
+	int dy[8] = {-25,-17,  0, 17, 25, 17,  0,-17};
+	// 밝기 그라데이션: rel=0(현재 활성) → rel=7(가장 오래됨)
+	U8 br[8] = { 255, 220, 180, 140, 100,  75,  55,  40 };
+	int i;
+	for(i = 0; i < 8; i++) {
+		int rel = (int)((phase - i + 8) & 7);
+		U8 b = br[rel];
+		U32 c = MAKE_COLORREF(b, b, b);
+		int x = cx + dx[i] - sz / 2;
+		int y = cy + dy[i] - sz / 2;
+		draw_roundrectfill(x, y, sz, sz, sz / 2, c);
+	}
+}
+
+// 모래시계 아이콘 ⏳ — 위는 윤곽만, 아래는 모래색으로 채움
+// sz=18 기준: 상단바(2) + 위 삼각형 윤곽(7) + 핀치(1) + 아래 삼각형 채움(6) + 하단바(2)
+static void draw_hourglass_icon(int x, int y, U32 frame_color)
+{
+	int sz = 18;
+	int i;
+	U32 SAND = MAKE_COLORREF(255, 200, 100);	// 모래색 (노란빛)
+	// 상단/하단 프레임 가로바
+	draw_rectfill(x, y, sz, 2, frame_color);
+	draw_rectfill(x, y + sz - 2, sz, 2, frame_color);
+	// 위 삼각형: 좌/우 사선 윤곽만 (속 비움)
+	for(i = 0; i < 7; i++) {
+		int w = 16 - 2 * i;	// 16,14,12,10,8,6,4
+		int xx = x + (sz - w) / 2;
+		draw_rectfill(xx, y + 2 + i, 1, 1, frame_color);			// 좌측 사선
+		draw_rectfill(xx + w - 1, y + 2 + i, 1, 1, frame_color);	// 우측 사선
+	}
+	// 가운데 핀치 (가장 좁은 행, 폭 2)
+	draw_rectfill(x + (sz / 2) - 1, y + 9, 2, 1, frame_color);
+	// 아래 삼각형: 모래색으로 채움 (모래가 쌓인 모습)
+	for(i = 0; i < 6; i++) {
+		int w = 4 + 2 * i;	// 4,6,8,10,12,14
+		draw_rectfill(x + (sz - w) / 2, y + 10 + i, w, 1, SAND);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PDF 홈화면 — 4영역 구성 (모든 패널 빨간 보더):
+//  [헤더] 모드 상태 알약 + 온열/음량 표시
+//  [시간] 모래시계 + 경과/대기 시간
+//  [체압] 실시간 체압 분포 + 인체 실루엣 + 하단 16칸 바 스트립
+//  [범례] 저/중/고/위험
+// ---------------------------------------------------------------------------
 void draw_status_overlay(void)
 {
-	// 반투명 배경
-	draw_rectfill(5, 60, 310, 135, MAKE_COLORREF(0, 0, 30));
+	char buf[32];
+	U32 BORDER     = MAKE_COLORREF(220, 50, 50);	// 패널 빨간 보더
+	U32 CELL_EMPTY = MAKE_COLORREF(150, 152, 158);	// 빈 셀(대기) 색
+	U32 BAR_OFF    = MAKE_COLORREF(150, 152, 158);
+	U32 BAR_ON     = MAKE_COLORREF(80, 200, 80);
 
-	// 4행 균등 배치: Y=70, 99, 128, 157 (간격 29px, 상하 10px 여유)
-	// 1행: 모드 이름 + 상태
-	egl_font_set_color(g_pFontKor, MAKE_COLORREF(0, 210, 255));
-	draw_text_kr(g_pFontKor, 10, 70, get_mode_name(bed_status.current_mode));
+	// ===== 1) 헤더 (y=0 ~ y=50, 높이 50) — 좌·우 박스 동일 폭 138 =====
+	draw_roundrect(5, 0, 138, 50, 8, BORDER);		// 좌측: 모드 상태
+	draw_roundrect(177, 0, 138, 50, 8, BORDER);	// 우측: 온열+음량
 
-	egl_font_set_color(g_pFontKor, MAKE_COLORREF(200, 200, 200));
-	draw_text_kr(g_pFontKor, 200, 70, get_state_name(bed_status.run_state));
-
-	// 2행: 등판
+	// 모드 상태 — 좌측 정렬, 동작 중 긴 모드명은 마퀴 스크롤
+	// 아이콘: 모두 18px 동일 크기
+	//   동작중(state=1) → ‖ (사각형 두 개)
+	//   일시정지(state=2) → ▶ (삼각형 한 개)
+	//   그 외 (대기/종료/초기화) → ▶❚ (대기중 기본)
 	{
-		char buf[32];
-		int bar_w = 120;
-		int bar_h = 14;
-
-		egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
-		draw_text_kr(g_pFontKor, 10, 99, "등판");
-		draw_rectfill(80, 105, bar_w, bar_h, MAKE_COLORREF(40, 40, 60));
-		if(bed_status.backrest_percent > 0) {
-			int fill = (bar_w * bed_status.backrest_percent) / 100;
-			draw_rectfill(80, 105, fill, bar_h, MAKE_COLORREF(0, 180, 255));
+		U32 icon_color;
+		switch(bed_status.run_state) {
+			case 1: icon_color = MAKE_COLORREF( 80, 220, 100); break;
+			case 2: icon_color = MAKE_COLORREF(255, 200,  50); break;
+			case 3: icon_color = MAKE_COLORREF(120, 160, 240); break;
+			default: icon_color = MAKE_COLORREF(255,  80,  80); break;
 		}
-		sprintf(buf, "%d%%", bed_status.backrest_percent);
-		egl_font_set_color(g_pFont28, MAKE_COLORREF(255, 255, 255));
-		bmpfont_draw(g_pFont28, 210, 99, buf);
+		if(bed_status.run_state == 1)
+			draw_pause_icon(10, 16, 18, icon_color);		// 동작중 → ‖
+		else if(bed_status.run_state == 2)
+			draw_triangle_icon(10, 16, 18, icon_color);		// 일시정지 → ▶
+		else
+			draw_play_icon(10, 16, 18, icon_color);			// 그 외 → ▶❚
 
-	// 3행: 다리판
-		egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
-		draw_text_kr(g_pFontKor, 10, 128, "다리");
-		draw_rectfill(80, 134, bar_w, bar_h, MAKE_COLORREF(40, 40, 60));
-		if(bed_status.leg_panel_percent > 0) {
-			int fill = (bar_w * bed_status.leg_panel_percent) / 100;
-			draw_rectfill(80, 134, fill, bar_h, MAKE_COLORREF(0, 200, 160));
+		// 상태별 텍스트 + 클리핑 + 스크롤 (모두 28px)
+		{
+			CLIP_RECT new_clip, old_clip;
+			new_clip.x = 32;
+			new_clip.y = 0;
+			new_clip.endx = 141;
+			new_clip.endy = 50;
+			old_clip = draw_set_clip_window(getbackframe(), &new_clip);
+
+			egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
+			draw_text_kr(g_pFontKor, 32 - (int)mode_text_offset, 11,
+				get_mode_status_text(bed_status.current_mode, bed_status.run_state));
+
+			draw_set_clip_window(getbackframe(), &old_clip);
 		}
-		sprintf(buf, "%d%%", bed_status.leg_panel_percent);
-		egl_font_set_color(g_pFont28, MAKE_COLORREF(255, 255, 255));
-		bmpfont_draw(g_pFont28, 210, 128, buf);
 	}
 
-	// 4행: 히터 + 볼륨
+	// 우측 온열 알약 (65×46) — 큰 아이콘 + g_pFont28 숫자
 	{
-		char buf[32];
+		U32 pill_bg = bed_status.heat_level > 0 ?
+			MAKE_COLORREF(180, 90, 30) : MAKE_COLORREF(60, 60, 70);
+		draw_roundrectfill(180, 2, 65, 46, 6, pill_bg);
+		// 아이콘(12×27) + 숫자(g_pFont28) 가운데 정렬
+		draw_thermo_icon(193, 11, MAKE_COLORREF(255, 255, 255));
+		sprintf(buf, "%d", bed_status.heat_level);
+		egl_font_set_color(g_pFont28, MAKE_COLORREF(255, 255, 255));
+		bmpfont_draw(g_pFont28, 215, 11, buf);
+	}
 
-		egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
-		draw_text_kr(g_pFontKor, 10, 157, "온열");
-		egl_font_set_color(g_pFontKor,
-			bed_status.heat_level > 0 ? MAKE_COLORREF(255, 160, 50) : MAKE_COLORREF(100, 100, 100));
-		draw_text_kr(g_pFontKor, 70, 157, get_heat_name(bed_status.heat_level));
-
-		egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
-		draw_text_kr(g_pFontKor, 150, 157, "볼륨");
+	// 우측 음량 알약 (64×46, 갭 4)
+	{
+		U32 pill_bg = bed_status.volume_level > 0 ?
+			MAKE_COLORREF(40, 100, 160) : MAKE_COLORREF(60, 60, 70);
+		draw_roundrectfill(249, 2, 64, 46, 6, pill_bg);
+		draw_speaker_icon(260, 12, MAKE_COLORREF(255, 255, 255));
 		sprintf(buf, "%d", bed_status.volume_level);
 		egl_font_set_color(g_pFont28, MAKE_COLORREF(255, 255, 255));
-		bmpfont_draw(g_pFont28, 215, 157, buf);
+		bmpfont_draw(g_pFont28, 286, 11, buf);
 	}
 
-	// 활성 바 표시 (매트리스 동작 중 건반 상태)
+	// ===== 2) 시간 (y=55 ~ y=105, 높이 50) =====
+	// VAIRANCE(0x20) / LEVITATE(0x10/11/12) 모드 활성 시 경과 시간 카운트업,
+	// 그 외에는 "00:00". 박스 가운데 정렬, g_pFont40.
+	draw_roundrect(5, 55, 310, 50, 8, BORDER);
+	draw_hourglass_icon(15, 71, MAKE_COLORREF(220, 220, 230));
+	{
+		int tw, tx;
+		U32 e = mode_timer_elapsed_ms;
+		if(mode_timer_mode != 0) {
+			sprintf(buf, "%02d:%02d",
+				(int)(e / 60000), (int)((e / 1000) % 60));
+		} else {
+			sprintf(buf, "00:00");
+		}
+		egl_font_set_color(g_pFont40, MAKE_COLORREF(255, 255, 255));
+		tw = text_width(g_pFont40, buf);
+		tx = 5 + (310 - tw) / 2;
+		bmpfont_draw(g_pFont40, tx, 60, buf);
+	}
+
+	// ===== 3) 체압 분포 (y=110 ~ y=410) — 범례 공간 확보 위해 축소 =====
+	draw_roundrect(5, 110, 310, 300, 8, BORDER);
+
+	// 타이틀 — g_pFontKor(28px), 박스(x=5~315, w=310) 가로 가운데 정렬
+	// 폭 직접 계산: "실시간 체압 분포" = 7 한글 × 28 + 2 공백 × 14 = 224
+	egl_font_set_color(g_pFontKor, MAKE_COLORREF(230, 230, 230));
+	{
+		const char* title = "실시간 체압 분포";
+		int tw = 7 * 28 + 2 * 14;	// 224
+		int tx = 5 + (310 - tw) / 2;	// 48
+		draw_text_kr(g_pFontKor, tx, 116, title);
+	}
+
+	// 측면뷰 침대 하단 (가로 바) — 위 셀 행과 동일 높이(22), 박스 바닥과 2px gap
+	{
+		U32 SHAPE = MAKE_COLORREF(55, 60, 70);
+		draw_roundrectfill(17, 385, 286, 22, 6, SHAPE);
+	}
+
+	// 측면뷰 머리 — 1행 2열 셀, bar[0..1]로 동작 상태 표시
+	// 모터 위치에 따라 셀이 위로 이동 (0=원위치, 1260=gap 중앙(28px), 3400=max(30px))
+	{
+		int row;
+		int hx = 17, hy = 361;
+		int cw = 22, ch = 22, gap = 2;
+		for(row = 0; row < 2; row++) {
+			int yo = motor_position_to_offset(motor_positions[row]);
+			draw_roundrectfill(
+				hx + row * (cw + gap),
+				hy - yo,
+				cw, ch, 3, bar[row] ? BAR_ON : BAR_OFF
+			);
+		}
+	}
+
+	// 탑뷰 그리드: 12 col × 7 row (머리 2 + 본체 10), pressure_map[0..11][0..6]
+	// 박스 가운데 정렬 (시작 x=17). 머리(col 0,1)와 메인(col 2~11) 사이 gap=2 유지.
+	{
+		int row, col;
+		int hx = 17, gx = 65, gy = 152;
+		int cw = 22, ch = 23, gap = 2;
+		for(row = 0; row < PRESSURE_ROWS; row++) {
+			int x = (row < 2) ? (hx + row * (cw + gap))
+			                  : (gx + (row - 2) * (cw + gap));
+			for(col = 0; col < PRESSURE_COLS; col++) {
+				U8 v = pressure_map[row][col];
+				draw_roundrectfill(
+					x,
+					gy + col * (ch + gap),
+					cw, ch, 3, pressure_to_color(v)
+				);
+			}
+		}
+	}
+
+	// 그리드와 바 스트립 사이 구분선 (패널 전체 너비)
+	draw_rectfill(11, 327, 298, 1, MAKE_COLORREF(180, 60, 60));
+
+	// 하단 바 스트립: 10 cells 가로 — bar[2..11]로 본체 모터 동작 상태 표시
+	// motor_positions[2..11]로 셀 vertical offset 계산
 	{
 		int i;
-		for(i = 0; i < MAX_BAR; i++) {
-			if(bar[i])
-				draw_surface(bar_img, BAR_X, (BAR_Y + BAR_I * i));
+		int bx = 65, by = 361;
+		int bw = 22, bh = 22, bgap = 2;
+		for(i = 0; i < 10; i++) {
+			int yo = motor_position_to_offset(motor_positions[i + 2]);
+			draw_roundrectfill(bx + i * (bw + bgap), by - yo, bw, bh, 3,
+				bar[i + 2] ? BAR_ON : BAR_OFF);
 		}
-		// 인체 이미지
-		if(body_info == true)
-			draw_surface(body_imag, BODY_X, BODY_Y);
+	}
+
+	// ===== 4) 압력 범례 — 그라데이션 바(상단) + 4단계 라벨(하단) =====
+	// 폭은 위 매트리스(x=17~303, w=286)와 동일하게 정렬
+	draw_roundrect(5, 413, 310, 67, 8, BORDER);
+	{
+		int bx = 17, by = 420, bw = 286, bh = 28;
+		int label_y = 455;
+		int i;
+		// 그라데이션 바: 픽셀별로 pressure_to_color(0~255) 색상 채움
+		for(i = 0; i < bw; i++) {
+			U8 v = (U8)((i * 254) / (bw - 1) + 1);	// 1~255 (0은 빈 셀)
+			draw_rectfill(bx + i, by, 1, bh, pressure_to_color(v));
+		}
+		// 단계 라벨 (저/중/고/위험) — 16px, 박스 내부 하단, 바 폭에 맞춰 분포
+		egl_font_set_color(g_pFontKor16, MAKE_COLORREF(220, 220, 220));
+		draw_text_kr(g_pFontKor16, bx + 0,           label_y, "저");
+		draw_text_kr(g_pFontKor16, bx + bw / 3 - 8,  label_y, "중");
+		draw_text_kr(g_pFontKor16, bx + 2*bw/3 - 8,  label_y, "고");
+		draw_text_kr(g_pFontKor16, bx + bw - 32,     label_y, "위험");
 	}
 }
 
@@ -722,12 +971,28 @@ void conform_key_proc(U8 cmd_act)
 	switch(cursor.mode)
 	{
 		case CURSOR_MODE:	// start/pause/restart
+			// bed_status.run_state로 conform_key_run 보정 — 모드가 자연 종료(시간 종료)되거나
+			// 외부에서 종료된 경우 stale CMD3_PAUSE/RESTART를 START로 리셋
+			if(bed_status.run_state == 0) {
+				conform_key_run = CMD3_START;
+				running_massage_type = -1;	// 자연 종료 후 stale 인덱스 클리어
+			}
 			if(conform_key_run == CMD3_START)
 			{// 최초 시작
 				// 마사지가 아닌 다른 모드 시작 시 running_massage_type 클리어
 				if(cmd_act < CMD2_MASSAGE || cmd_act >= (CMD2_MASSAGE + MASSAGE_MAX))
 					running_massage_type = -1;
 				esp32_packet_send(CMD1_SEND_RUN_ST, cmd_act, &conform_key_run , 1);
+				// 새 모드 시작 → 이전 stdby 진행 취소 (사용자가 명백히 새 동작 선택)
+				if(stdby_in_progress) {
+					stdby_in_progress = false;
+					stdby_complete = false;
+					debugprintf("\n\r [CONFORM] stdby canceled by new mode start");
+				}
+				// 즉시 로컬 상태 반영 + 잠금
+				bed_status.current_mode = cmd_act;
+				bed_status.run_state = 1;
+				bed_state_lock_remain = 100;
 				conform_key_run = CMD3_PAUSE;
 				// 모드 실행 후 홈화면으로 전환 (상태 오버레이로 동작 표시)
 				smart_bed_status.status = MODE_HOME;
@@ -739,11 +1004,17 @@ void conform_key_proc(U8 cmd_act)
 				if(conform_key_run == CMD3_PAUSE)
 				{//일시정지
 					esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_PAUSE, &conform_key_run, 1);
+					bed_status.run_state = 2;	// 즉시 일시정지 상태 반영
+					bed_state_lock_remain = 100;
+					smart_bed_display.display_refresh = true;
 					conform_key_run = CMD3_RESTART;
 				}
 				else
 				{// 재 시작
 					esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_RESTART, &conform_key_run, 1);
+					bed_status.run_state = 1;	// 즉시 동작중 상태 반영
+					bed_state_lock_remain = 100;
+					smart_bed_display.display_refresh = true;
 					conform_key_run = CMD3_PAUSE;
 				}
 			}
@@ -773,13 +1044,27 @@ void conform_key_proc1(U8 cmd_act)
 		temp_body.body[0][0] = cursor.type + 1;
 		tmp = 1;
 		esp32_packet_send(CMD1_SEND_RUN_ST, cmd_act, &tmp, 1);
+		// 새 모드 시작 → 이전 stdby 진행 취소
+		if(stdby_in_progress) {
+			stdby_in_progress = false;
+			stdby_complete = false;
+			debugprintf("\n\r [CONFORM1] stdby canceled by new mode start");
+		}
+		// 즉시 로컬 상태 반영 + 잠금
+		bed_status.current_mode = cmd_act;
+		bed_status.run_state = 1;
+		bed_state_lock_remain = 100;
 	}
 	else
 	{
 		temp_body.body[0][0] = 0;
 		esp32_packet_send(CMD1_SEND_RUN_ST, cmd_act, &tmp, 1);
+		// 종료 — 즉시 mode 클리어 + 잠금
+		bed_status.current_mode = 0;
+		bed_status.run_state = 0;
+		bed_state_lock_remain = 100;
 	}
-	smart_bed_display.display_refresh = true;// lcd refresh 
+	smart_bed_display.display_refresh = true;// lcd refresh
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -787,18 +1072,42 @@ void conform_key_proc1(U8 cmd_act)
 // 체압분산
 // KEY : up, down, left, right, 확인, 설정/저장, 초기화, 온열, 통풍
 // 동작 중  체압분산 키를 다시누르면 동작을 종료하고 현재 값을 저장후 된다.
-// pressure value(0~255) -> RGB color (blue->cyan->green->yellow->red)
+// pressure value(0~255) -> 연속 그라데이션 색상
+//   0       : 빈 셀 (회색)
+//   1~84    : 파랑(저) → 녹색(중)
+//   85~169  : 녹색(중) → 주황(고)
+//   170~255 : 주황(고) → 빨강(위험)
+static U32 interp_rgb(int r1, int g1, int b1, int r2, int g2, int b2, int t, int t_max)
+{
+	int r = r1 + (r2 - r1) * t / t_max;
+	int g = g1 + (g2 - g1) * t / t_max;
+	int b = b1 + (b2 - b1) * t / t_max;
+	if(r < 0) r = 0; if(r > 255) r = 255;
+	if(g < 0) g = 0; if(g > 255) g = 255;
+	if(b < 0) b = 0; if(b > 255) b = 255;
+	return MAKE_COLORREF(r, g, b);
+}
+
 U32 pressure_to_color(U8 value)
 {
-	if(value == 0)
-		return MAKE_COLORREF(0, 0, 40);
-	if(value < 64)
-		return MAKE_COLORREF(0, value * 4, 255);
-	if(value < 128)
-		return MAKE_COLORREF(0, 255, 255 - (value - 64) * 4);
-	if(value < 192)
-		return MAKE_COLORREF((value - 128) * 4, 255, 0);
-	return MAKE_COLORREF(255, 255 - (value - 192) * 4, 0);
+	if(value == 0) return MAKE_COLORREF(150, 152, 158);	// 빈 셀
+	if(value < 85)
+		return interp_rgb( 60, 100, 220,  80, 200,  80, value, 84);
+	if(value < 170)
+		return interp_rgb( 80, 200,  80, 255, 160,  50, value - 85, 84);
+	return     interp_rgb(255, 160,  50, 220,  60,  60, value - 170, 85);
+}
+
+// 모터 위치 → 측면뷰 셀 y-offset (위로 이동량)
+//   0     → 0px (원위치)
+//   1260  → 28px (구분선↔바 스트립 33px gap의 중앙)
+//   3400+ → 30px (gap 중앙에서 추가로 2px 더 위)
+int motor_position_to_offset(S16 pos)
+{
+	if(pos <= 0) return 0;
+	if(pos <= 1260) return ((int)pos * 28) / 1260;
+	if(pos <= 3400) return 28 + ((int)(pos - 1260) * 2) / (3400 - 1260);
+	return 30;
 }
 
 // 체압분산 관련된 키 입력을 체크하는 루틴
@@ -831,30 +1140,14 @@ void dispersion_proc(void)
 			smart_bed_status.status = MODE_HOME;
 			remocon_key.key_val = 0xFF;
 			break;
-		case UP_KEY:
-			up_key_proc();
-			remocon_key.key_val = 0xFF;
-			break;
-		case DOWN_KEY:
-			down_key_proc();
-			remocon_key.key_val = 0xFF;
-			break;
-		case LEFT_KEY:		// 상체/하체 설정 변경
-			left_key_proc(false, &dispersion);
-			remocon_key.key_val = 0xFF;
-			break;
-		case RIGHT_KEY:	// 상체/하체 설정 변경
-			right_key_proc(false, &dispersion);
-			remocon_key.key_val = 0xFF;
-			break;
-			
-		case CONFORM_KEY:// 확인(설정중에서는 확인키로 Enable/Disable
+		case CONFORM_KEY:
 			conform_key_proc(CMD2_DISPERSION);
-
 			remocon_key.key_val = 0xFF;
 			break;
-		case SET_KEY:
-			set_key_proc(CMD2_DISPERSION, &dispersion);	// 체압분산
+		case UP_KEY:
+		case DOWN_KEY:
+		case LEFT_KEY:
+		case RIGHT_KEY:
 			remocon_key.key_val = 0xFF;
 			break;
 		default:
@@ -862,7 +1155,77 @@ void dispersion_proc(void)
 	}
 }
 
+// PDF 슬라이드 8 — 체압분산 (단일 모드, 큰 노란 박스)
 void dispersion_draw(void){
+	char buf[8];
+	U32 BORDER = MAKE_COLORREF(220, 50, 50);
+	U32 icon_color;
+	U32 pill_bg;
+
+	set_draw_target(getbackframe());
+	draw_rectfill(0, 0, 320, 480, MAKE_COLORREF(20, 25, 38));
+
+	// 헤더
+	draw_roundrect(5, 0, 138, 50, 8, BORDER);
+	draw_roundrect(177, 0, 138, 50, 8, BORDER);
+	switch(bed_status.run_state) {
+		case 1: icon_color = MAKE_COLORREF( 80, 220, 100); break;
+		case 2: icon_color = MAKE_COLORREF(255, 200,  50); break;
+		case 3: icon_color = MAKE_COLORREF(120, 160, 240); break;
+		default: icon_color = MAKE_COLORREF(255,  80,  80); break;
+	}
+	if(bed_status.run_state == 1)
+		draw_pause_icon(10, 16, 18, icon_color);
+	else if(bed_status.run_state == 2)
+		draw_triangle_icon(10, 16, 18, icon_color);
+	else
+		draw_play_icon(10, 16, 18, icon_color);
+	{
+		CLIP_RECT new_clip, old_clip;
+		new_clip.x = 32;
+		new_clip.y = 0;
+		new_clip.endx = 141;
+		new_clip.endy = 50;
+		old_clip = draw_set_clip_window(getbackframe(), &new_clip);
+		egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
+		draw_text_kr(g_pFontKor, 32 - (int)mode_text_offset, 11,
+			get_mode_status_text(bed_status.current_mode, bed_status.run_state));
+		draw_set_clip_window(getbackframe(), &old_clip);
+	}
+
+	pill_bg = bed_status.heat_level > 0 ?
+		MAKE_COLORREF(180, 90, 30) : MAKE_COLORREF(60, 60, 70);
+	draw_roundrectfill(180, 2, 65, 46, 6, pill_bg);
+	draw_thermo_icon(193, 11, MAKE_COLORREF(255, 255, 255));
+	sprintf(buf, "%d", bed_status.heat_level);
+	egl_font_set_color(g_pFont28, MAKE_COLORREF(255, 255, 255));
+	bmpfont_draw(g_pFont28, 215, 11, buf);
+
+	pill_bg = bed_status.volume_level > 0 ?
+		MAKE_COLORREF(40, 100, 160) : MAKE_COLORREF(60, 60, 70);
+	draw_roundrectfill(249, 2, 64, 46, 6, pill_bg);
+	draw_speaker_icon(260, 12, MAKE_COLORREF(255, 255, 255));
+	sprintf(buf, "%d", bed_status.volume_level);
+	bmpfont_draw(g_pFont28, 286, 11, buf);
+
+	// 체압분산 타이틀 (청록색)
+	draw_roundrectfill(5, 55, 310, 50, 8, MAKE_COLORREF(80, 180, 200));
+	egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
+	draw_text_kr(g_pFontKor, 104, 66, "체압분산");
+
+	// 노란 박스 (단일 모드) — 전체 폭으로 확장 (타이틀 바와 동일)
+	draw_roundrectfill(5, 224, 310, 98, 8, MAKE_COLORREF(255, 230, 80));
+	egl_font_set_color(g_pFontKor, MAKE_COLORREF(20, 25, 38));
+	draw_text_kr(g_pFontKor, 104, 259, "체압분산");
+
+	// 푸터
+	egl_font_set_color(g_pFontKor16, MAKE_COLORREF(200, 200, 200));
+	draw_text_kr(g_pFontKor16, 70, 460, "체압분산 버튼 : 홈으로");
+
+	flip();
+}
+
+void dispersion_draw_legacy(void){
 	int i = 0, num = 0, digits = 0;
 	char string[100] = {0, };
 
@@ -1000,20 +1363,27 @@ void levitate_proc(void)
 			smart_bed_status.status = MODE_HOME;
 			remocon_key.key_val = 0xFF;
 			break;
-		case UP_KEY:
-			up_key_proc();
+		case UP_KEY:		// 위 → 모드 선택 위로 이동
+			if(cursor.type)
+				cursor.type--;
+			else
+				cursor.type = cursor.type_max - 1;
+			memcpy(&temp_body, &levitate[cursor.type], sizeof(BODY));
+			conform_key_run = 0;
+			smart_bed_display.display_refresh = true;
 			remocon_key.key_val = 0xFF;
 			break;
-		case DOWN_KEY:
-			down_key_proc();
+		case DOWN_KEY:		// 아래 → 모드 선택 아래로 이동
+			cursor.type++;
+			if(cursor.type >= cursor.type_max)
+				cursor.type = 0;
+			memcpy(&temp_body, &levitate[cursor.type], sizeof(BODY));
+			conform_key_run = 0;
+			smart_bed_display.display_refresh = true;
 			remocon_key.key_val = 0xFF;
 			break;
-		case LEFT_KEY:		// 상체/하체 설정 감소수
-			left_key_proc(true, levitate);
-			remocon_key.key_val = 0xFF;
-			break;
-		case RIGHT_KEY:	// 상체/하체 설정 증가
-			right_key_proc(true, levitate);
+		case LEFT_KEY:		// 좌/우는 PDF 디자인에서 미사용
+		case RIGHT_KEY:
 			remocon_key.key_val = 0xFF;
 			break;
 		case CONFORM_KEY:// 확인(설정중에서는 확인키로 Enable/Disable
@@ -1043,7 +1413,110 @@ void levitate_proc(void)
 
 
 
+// PDF 슬라이드 6 — 교대부양 모드 선택 화면
 void levitate_draw(void){
+	int i;
+	U32 BORDER = MAKE_COLORREF(220, 50, 50);
+	const char* mode_labels[3] = { "일반모드", "집중모드", "수면모드" };
+	const int mode_durations[3] = { 5, 3, 60 };
+
+	set_draw_target(getbackframe());
+	// 단색 배경
+	draw_rectfill(0, 0, 320, 480, MAKE_COLORREF(20, 25, 38));
+
+	// ===== 헤더 (홈과 동일) =====
+	draw_roundrect(5, 0, 138, 50, 8, BORDER);
+	draw_roundrect(177, 0, 138, 50, 8, BORDER);
+
+	// 모드 상태 (좌측) — get_mode_status_text 사용
+	{
+		U32 icon_color;
+		switch(bed_status.run_state) {
+			case 1: icon_color = MAKE_COLORREF( 80, 220, 100); break;
+			case 2: icon_color = MAKE_COLORREF(255, 200,  50); break;
+			case 3: icon_color = MAKE_COLORREF(120, 160, 240); break;
+			default: icon_color = MAKE_COLORREF(255,  80,  80); break;
+		}
+		if(bed_status.run_state == 1)
+			draw_pause_icon(10, 16, 18, icon_color);
+		else if(bed_status.run_state == 2)
+			draw_triangle_icon(10, 16, 18, icon_color);
+		else
+			draw_play_icon(10, 16, 18, icon_color);
+		{
+			CLIP_RECT new_clip, old_clip;
+			new_clip.x = 32;
+			new_clip.y = 0;
+			new_clip.endx = 141;
+			new_clip.endy = 50;
+			old_clip = draw_set_clip_window(getbackframe(), &new_clip);
+			egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
+			draw_text_kr(g_pFontKor, 32 - (int)mode_text_offset, 11,
+				get_mode_status_text(bed_status.current_mode, bed_status.run_state));
+			draw_set_clip_window(getbackframe(), &old_clip);
+		}
+	}
+
+	// 온도 + 음량 (우측)
+	{
+		char buf[8];
+		U32 pill_bg;
+		pill_bg = bed_status.heat_level > 0 ?
+			MAKE_COLORREF(180, 90, 30) : MAKE_COLORREF(60, 60, 70);
+		draw_roundrectfill(180, 2, 65, 46, 6, pill_bg);
+		draw_thermo_icon(193, 11, MAKE_COLORREF(255, 255, 255));
+		sprintf(buf, "%d", bed_status.heat_level);
+		egl_font_set_color(g_pFont28, MAKE_COLORREF(255, 255, 255));
+		bmpfont_draw(g_pFont28, 215, 11, buf);
+
+		pill_bg = bed_status.volume_level > 0 ?
+			MAKE_COLORREF(40, 100, 160) : MAKE_COLORREF(60, 60, 70);
+		draw_roundrectfill(249, 2, 64, 46, 6, pill_bg);
+		draw_speaker_icon(260, 12, MAKE_COLORREF(255, 255, 255));
+		sprintf(buf, "%d", bed_status.volume_level);
+		bmpfont_draw(g_pFont28, 286, 11, buf);
+	}
+
+	// ===== 모드 선택 영역 =====
+	// 타이틀 바 (녹색) — 시간 박스 자리로 올리고 살짝 키움 (h=38 → 50)
+	draw_roundrectfill(5, 55, 310, 50, 8, MAKE_COLORREF(60, 160, 100));
+	egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
+	draw_text_kr(g_pFontKor, 104, 66, "교대부양");
+
+	// 3개 모드 버튼 — 크기 키우고 여유롭게 배치
+	// h=88, gap=15, start y=125 → 마지막 버튼 끝 y=419, 푸터(y=460)까지 41px 여유
+	{
+		int btn_h = 88;
+		int btn_gap = 15;
+		int btn_start = 125;
+		for(i = 0; i < LEVIT_MAX; i++) {
+			int y = btn_start + i * (btn_h + btn_gap);
+			U32 bg, tc;
+			char buf[40];
+			if(cursor.type == i) {
+				bg = MAKE_COLORREF(255, 230, 80);	// 선택됨 노란색
+				tc = MAKE_COLORREF(20, 25, 38);
+			} else {
+				bg = MAKE_COLORREF(230, 230, 230);	// 비선택 회색
+				tc = MAKE_COLORREF(20, 25, 38);
+			}
+			draw_roundrectfill(5, y, 310, btn_h, 8, bg);
+			sprintf(buf, "%s [%d분]", mode_labels[i], mode_durations[i]);
+			egl_font_set_color(g_pFontKor, tc);
+			// 28px 폰트를 88px 박스에 세로 가운데 정렬 → top = y + (88-28)/2 = y + 30
+			draw_text_kr(g_pFontKor, 70, y + 30, buf);
+		}
+	}
+
+	// 푸터 힌트 — 화면 맨 아래
+	egl_font_set_color(g_pFontKor16, MAKE_COLORREF(200, 200, 200));
+	draw_text_kr(g_pFontKor16, 70, 460, "교대부양 버튼 : 홈으로");
+
+	flip();
+}
+
+// 기존 레거시 levitate_draw (체압 분포 + 라디오 + 설정 UI) — 현재 미사용
+void levitate_draw_legacy(void){
 	int i = 0, num = 0, digits = 0;
 	char string[200] = {0, };
 
@@ -1167,11 +1640,17 @@ void massage_proc(void){
 	    cursor.type_max = MASSAGE_MAX;
 
 		// 동작 중인 마사지가 있으면 해당 마사지로 커서 이동 및 동작 상태 복원
-		if(running_massage_type >= 0 && running_massage_type < MASSAGE_MAX){
+		// 단, 자연 종료(state=0)된 경우엔 stale running_massage_type 무시하고 START 상태로
+		if(running_massage_type >= 0 && running_massage_type < MASSAGE_MAX &&
+		   bed_status.run_state != 0){
 			cursor.type = running_massage_type;
-			conform_key_run = CMD3_PAUSE;
+			if(bed_status.run_state == 2)
+				conform_key_run = CMD3_RESTART;
+			else
+				conform_key_run = CMD3_PAUSE;
 		} else {
-			conform_key_run = 0;
+			conform_key_run = CMD3_START;
+			running_massage_type = -1;
 		}
 
 		memcpy(&temp_body, &massage[cursor.type], sizeof(BODY));// 현재 설정 임시 버퍼로 복사
@@ -1183,33 +1662,37 @@ void massage_proc(void){
 	}
 	
 	switch(remocon_key.key_val){
-		case MASSA_KEY:// 체압 분산, 마사지 키를 다시누르지 않는다.
+		case MASSA_KEY:
 			smart_bed_status.status = MODE_HOME;
 			remocon_key.key_val = 0xFF;
 			break;
-		case UP_KEY:
-			up_key_proc();
+		case UP_KEY:	// 위 → 모드 선택 위
+			if(cursor.type)
+				cursor.type--;
+			else
+				cursor.type = cursor.type_max - 1;
+			memcpy(&temp_body, &massage[cursor.type], sizeof(BODY));
+			conform_key_run = 0;
+			massage_anim_offset = -90;	// 한 슬롯 (90px) 위에서 시작 → 0으로 슬라이드 다운
+			smart_bed_display.display_refresh = true;
 			remocon_key.key_val = 0xFF;
 			break;
-		case DOWN_KEY:
-			down_key_proc();
+		case DOWN_KEY:	// 아래 → 모드 선택 아래
+			cursor.type++;
+			if(cursor.type >= cursor.type_max)
+				cursor.type = 0;
+			memcpy(&temp_body, &massage[cursor.type], sizeof(BODY));
+			conform_key_run = 0;
+			massage_anim_offset = +90;	// 한 슬롯 아래에서 시작 → 0으로 슬라이드 업
+			smart_bed_display.display_refresh = true;
 			remocon_key.key_val = 0xFF;
 			break;
-		case LEFT_KEY:		// 상체/하체 설정 변경
-			left_key_proc(true, &massage[cursor.type]);
+		case LEFT_KEY:
+		case RIGHT_KEY:
 			remocon_key.key_val = 0xFF;
 			break;
-		case RIGHT_KEY:	// 상체/하체 설정 변경
-			right_key_proc(true, &massage[cursor.type]);
-			remocon_key.key_val = 0xFF;
-			break;
-			
-		case CONFORM_KEY:// 확인(설정중에서는 확인키로 Enable/Disable
+		case CONFORM_KEY:
 			conform_key_proc(CMD2_MASSAGE + cursor.type);
-			remocon_key.key_val = 0xFF;
-			break;
-		case SET_KEY:
-			set_key_proc(CMD2_MASSAGE + cursor.type, &massage[cursor.type]);	
 			remocon_key.key_val = 0xFF;
 			break;
 		default:
@@ -1218,8 +1701,137 @@ void massage_proc(void){
 }
 
 
-
+// PDF 슬라이드 10 — 마사지 (12 모드, 3-항목 스크롤 윈도우)
 void massage_draw(void){
+	char buf[8];
+	int slot;
+	U32 BORDER = MAKE_COLORREF(220, 50, 50);
+	U32 icon_color, pill_bg;
+
+	set_draw_target(getbackframe());
+	draw_rectfill(0, 0, 320, 480, MAKE_COLORREF(20, 25, 38));
+
+	// 헤더
+	draw_roundrect(5, 0, 138, 50, 8, BORDER);
+	draw_roundrect(177, 0, 138, 50, 8, BORDER);
+	switch(bed_status.run_state) {
+		case 1: icon_color = MAKE_COLORREF( 80, 220, 100); break;
+		case 2: icon_color = MAKE_COLORREF(255, 200,  50); break;
+		case 3: icon_color = MAKE_COLORREF(120, 160, 240); break;
+		default: icon_color = MAKE_COLORREF(255,  80,  80); break;
+	}
+	if(bed_status.run_state == 1)
+		draw_pause_icon(10, 16, 18, icon_color);
+	else if(bed_status.run_state == 2)
+		draw_triangle_icon(10, 16, 18, icon_color);
+	else
+		draw_play_icon(10, 16, 18, icon_color);
+	{
+		CLIP_RECT new_clip, old_clip;
+		new_clip.x = 32;
+		new_clip.y = 0;
+		new_clip.endx = 141;
+		new_clip.endy = 50;
+		old_clip = draw_set_clip_window(getbackframe(), &new_clip);
+		egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
+		draw_text_kr(g_pFontKor, 32 - (int)mode_text_offset, 11,
+			get_mode_status_text(bed_status.current_mode, bed_status.run_state));
+		draw_set_clip_window(getbackframe(), &old_clip);
+	}
+
+	pill_bg = bed_status.heat_level > 0 ?
+		MAKE_COLORREF(180, 90, 30) : MAKE_COLORREF(60, 60, 70);
+	draw_roundrectfill(180, 2, 65, 46, 6, pill_bg);
+	draw_thermo_icon(193, 11, MAKE_COLORREF(255, 255, 255));
+	sprintf(buf, "%d", bed_status.heat_level);
+	egl_font_set_color(g_pFont28, MAKE_COLORREF(255, 255, 255));
+	bmpfont_draw(g_pFont28, 215, 11, buf);
+
+	pill_bg = bed_status.volume_level > 0 ?
+		MAKE_COLORREF(40, 100, 160) : MAKE_COLORREF(60, 60, 70);
+	draw_roundrectfill(249, 2, 64, 46, 6, pill_bg);
+	draw_speaker_icon(260, 12, MAKE_COLORREF(255, 255, 255));
+	sprintf(buf, "%d", bed_status.volume_level);
+	bmpfont_draw(g_pFont28, 286, 11, buf);
+
+	// 마사지 타이틀 (보라색)
+	draw_roundrectfill(5, 55, 310, 50, 8, MAKE_COLORREF(150, 80, 200));
+	egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
+	draw_text_kr(g_pFontKor, 118, 66, "마사지");
+
+	// 카드 슬라이드 — 외형은 "현재 위치(슬롯)"에 따라 결정
+	//   middle slot 가장 가까운 카드 = 노란 큰 박스 (포커싱)
+	//   나머지 = 회색 작은 박스
+	//   카드들이 슬라이드하면서 yellow가 자연스럽게 이전→현재로 넘겨받음
+	{
+		int slide = massage_anim_offset;
+		const int H = 90;
+		const int top_y = 140;
+		const int middle_y = 230;
+		const int bottom_y = 320;
+		int idx_arr[5];
+		int y_arr[5];
+		bool draw_arr[5];
+		int i, closest = -1, closest_dist = 99999;
+		char line[40];
+
+		// 3개 카드 (prev, cur, next)
+		idx_arr[0] = -1;
+		idx_arr[1] = ((int)cursor.type - 1 + (int)cursor.type_max) % (int)cursor.type_max;
+		idx_arr[2] = cursor.type;
+		idx_arr[3] = (cursor.type + 1) % cursor.type_max;
+		idx_arr[4] = -1;
+		y_arr[0] = 0; y_arr[4] = 0;
+		y_arr[1] = top_y + slide;
+		y_arr[2] = middle_y + slide;
+		y_arr[3] = bottom_y + slide;
+		draw_arr[0] = false;
+		draw_arr[1] = true;
+		draw_arr[2] = true;
+		draw_arr[3] = true;
+		draw_arr[4] = false;
+
+		// middle_y에 가장 가까운 카드 = 노란 박스 (middle 슬롯 고정)
+		for(i = 0; i < 5; i++) {
+			int dist;
+			if(!draw_arr[i]) continue;
+			dist = y_arr[i] - middle_y;
+			if(dist < 0) dist = -dist;
+			if(dist < closest_dist) {
+				closest_dist = dist;
+				closest = i;
+			}
+		}
+
+		// 1단계: 포커싱 안 된 카드들 먼저 (회색 작은 박스)
+		for(i = 0; i < 5; i++) {
+			if(!draw_arr[i] || i == closest) continue;
+			sprintf(line, "%d. %s", idx_arr[i] + 1, get_mode_name(0x31 + idx_arr[i]));
+			draw_roundrectfill(40, y_arr[i], 240, 80, 8, MAKE_COLORREF(170, 170, 170));
+			egl_font_set_color(g_pFontKor, MAKE_COLORREF(70, 70, 70));
+			draw_text_kr(g_pFontKor, 70, y_arr[i] + 26, line);
+		}
+
+		// 2단계: 포커싱 카드 마지막에 (노란 큰 박스, z-top) — 전체 폭 확장
+		if(closest >= 0) {
+			int y = y_arr[closest] - 10;	// 큰 박스 (100h) 작은 박스 (80h) 중앙 정렬
+			sprintf(line, "%d. %s", idx_arr[closest] + 1, get_mode_name(0x31 + idx_arr[closest]));
+			draw_roundrectfill(5, y, 310, 100, 10, MAKE_COLORREF(255, 230, 80));
+			egl_font_set_color(g_pFontKor, MAKE_COLORREF(20, 25, 38));
+			draw_text_kr(g_pFontKor, 30, y + 36, line);
+		}
+		(void)H;
+	}
+	(void)slot;
+
+	// 푸터
+	egl_font_set_color(g_pFontKor16, MAKE_COLORREF(200, 200, 200));
+	draw_text_kr(g_pFontKor16, 80, 460, "마사지 버튼 : 홈으로");
+
+	flip();
+}
+
+void massage_draw_legacy(void){
 	int i = 0, num = 0, digits = 0;
 	char string[100] = {0, };
 
@@ -1328,6 +1940,8 @@ bool move_flag = false;
 bool left_key = false;
 bool right_key = false;
 bool running_flag = false;
+static bool care_paused = false;	// 케어모드 일시정지 상태
+
 void patient_care_proc(void)
 {
 	if(smart_bed_display.status != MODE_PATIENT_CARE)
@@ -1336,54 +1950,84 @@ void patient_care_proc(void)
 		smart_bed_display.display_refresh = true;
 		memset(&cursor, 0, sizeof(CURSOR));// key init
 		cursor.set_max = 0;
-		cursor.type_max = 2;	// 머리감기, 식사 (배변→식사 변경)
+		cursor.type_max = 3;	// 머리감기, 식사, 틸팅
 		memcpy(&temp_body, &patient_care, sizeof(BODY));
 
 		remocon_key.key_val = 0xFF;
 		conform_key_run = 0;
 		running_flag = false;
+		care_paused = false;
 		return;
 	}
 
 	switch(remocon_key.key_val){
 		case CARE_KEY:
+			// 케어 모드 종료 → 홈으로
+			if(running_flag){
+				U8 tmp = 0;
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE, &tmp, 0);
+				running_flag = false;
+				care_paused = false;
+			}
 			smart_bed_status.status = MODE_HOME;
 			remocon_key.key_val = 0xFF;
 			break;
 		case UP_KEY:
+			// 동작 중이면 key_read()에서 조그 처리됨
+			// 동작 안 할 때: 모드 선택 위로
+			if(!running_flag) {
+				if(cursor.type > 0)
+					cursor.type--;
+				else
+					cursor.type = cursor.type_max - 1;
+				smart_bed_display.display_refresh = true;
+			}
 			remocon_key.key_val = 0xFF;
 			break;
 		case DOWN_KEY:
+			// 동작 안 할 때: 모드 선택 아래로
+			if(!running_flag) {
+				if(cursor.type < cursor.type_max - 1)
+					cursor.type++;
+				else
+					cursor.type = 0;
+				smart_bed_display.display_refresh = true;
+			}
 			remocon_key.key_val = 0xFF;
 			break;
 		case LEFT_KEY:
-			if(!running_flag)
-			{
-				left_key_proc(true, patient_care);
-			}
-			remocon_key.key_val = 0xFF;
-			break;
 		case RIGHT_KEY:
-			if(!running_flag)
-			{
-				right_key_proc(true, patient_care);
-			}
+			// 틸팅 조그는 key_read()에서 실시간 처리 (running 중에만)
 			remocon_key.key_val = 0xFF;
 			break;
-		case CONFORM_KEY:// 확인 (토글: 시작↔정지)
+		case CONFORM_KEY:// 확인 (시작 / 일시정지 토글)
 			if(running_flag)
 			{
-				running_flag = false;
+				// 동작 중 → 일시정지/재개 토글
 				U8 tmp = 0;
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE, &tmp, 0);
+				if(care_paused){
+					care_paused = false;
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_RESTART, &tmp, 0);
+				} else {
+					care_paused = true;
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE, &tmp, 0);
+				}
 			}
 			else
 			{
+				// 시작: 선택된 케어 모드 실행 (화면 유지)
 				running_flag = true;
-				if(cursor.type == PATIENT_MEAL)
-					conform_key_proc(CMD2_MEAL);
+				care_paused = false;
+				U8 tmp = 0;
+				U8 cmd;
+				if(cursor.type == PATIENT_HEAD)
+					cmd = CMD2_HEAR;
+				else if(cursor.type == PATIENT_MEAL)
+					cmd = CMD2_MEAL;
 				else
-					conform_key_proc(CMD2_HEAR + cursor.type);
+					cmd = CMD2_TILT_CARE;
+				esp32_packet_send(CMD1_SEND_RUN_ST, cmd, &tmp, 0);
+				// 화면 유지 (홈으로 이동하지 않음)
 			}
 			smart_bed_display.display_refresh = true;
 			remocon_key.key_val = 0xFF;
@@ -1397,16 +2041,133 @@ void patient_care_proc(void)
 	}
 }
 
-// 환자케어: 머리감기/식사 2버튼 중앙 배치
-#define CARE_BTN1_X	50		// 머리감기 버튼 X
-#define CARE_BTN2_X	180		// 식사 버튼 X
+// draw_triangle_up/down은 posture 섹션에 정의 — forward declaration
+static void draw_triangle_up(int cx, int cy, int size, U32 color);
+static void draw_triangle_down(int cx, int cy, int size, U32 color);
 
+// 환자케어: 머리감기/식사/틸팅 3버튼 배치
+#define CARE_BTN1_X	15		// 머리감기 버튼 X
+#define CARE_BTN2_X	115		// 식사 버튼 X
+#define CARE_BTN3_X	215		// 틸팅 버튼 X
+
+// 조그 화살표 위치 (서브스크린)
+#define CARE_ARROW_CX	160		// 화살표 중심 X
+#define CARE_ARROW_UP_Y	250		// ▲ 꼭지점 Y
+#define CARE_ARROW_DN_Y	420		// ▼ 꼭지점 Y
+#define CARE_ARROW_LT_X	60		// ◀ 꼭지점 X
+#define CARE_ARROW_RT_X	260		// ▶ 꼭지점 X
+#define CARE_ARROW_LR_Y	340		// ◀▶ 중심 Y
+#define CARE_ARROW_SIZE	25		// 화살표 크기
+
+static void draw_triangle_left(int cx, int cy, int size, U32 color)
+{
+	int i;
+	for(i = 0; i < size; i++){
+		int w = i;
+		draw_rectfill(cx + i, cy - w, 1, w * 2 + 1, color);
+	}
+}
+
+static void draw_triangle_right(int cx, int cy, int size, U32 color)
+{
+	int i;
+	for(i = 0; i < size; i++){
+		int w = i;
+		draw_rectfill(cx + size - 1 - i, cy - w, 1, w * 2 + 1, color);
+	}
+}
+
+// PDF 슬라이드 12 — 돌봄케어 (머리감기/식사모드/틸팅모드 3 옵션)
 void patient_care_draw(void)
+{
+	char buf[8];
+	int i;
+	U32 BORDER = MAKE_COLORREF(220, 50, 50);
+	U32 icon_color, pill_bg;
+	const char* care_labels[3] = { "머리감기", "식사모드", "틸팅모드" };
+
+	set_draw_target(getbackframe());
+	draw_rectfill(0, 0, 320, 480, MAKE_COLORREF(20, 25, 38));
+
+	// 헤더
+	draw_roundrect(5, 0, 138, 50, 8, BORDER);
+	draw_roundrect(177, 0, 138, 50, 8, BORDER);
+	switch(bed_status.run_state) {
+		case 1: icon_color = MAKE_COLORREF( 80, 220, 100); break;
+		case 2: icon_color = MAKE_COLORREF(255, 200,  50); break;
+		case 3: icon_color = MAKE_COLORREF(120, 160, 240); break;
+		default: icon_color = MAKE_COLORREF(255,  80,  80); break;
+	}
+	if(bed_status.run_state == 1)
+		draw_pause_icon(10, 16, 18, icon_color);
+	else if(bed_status.run_state == 2)
+		draw_triangle_icon(10, 16, 18, icon_color);
+	else
+		draw_play_icon(10, 16, 18, icon_color);
+	{
+		CLIP_RECT new_clip, old_clip;
+		new_clip.x = 32;
+		new_clip.y = 0;
+		new_clip.endx = 141;
+		new_clip.endy = 50;
+		old_clip = draw_set_clip_window(getbackframe(), &new_clip);
+		egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
+		draw_text_kr(g_pFontKor, 32 - (int)mode_text_offset, 11,
+			get_mode_status_text(bed_status.current_mode, bed_status.run_state));
+		draw_set_clip_window(getbackframe(), &old_clip);
+	}
+
+	pill_bg = bed_status.heat_level > 0 ?
+		MAKE_COLORREF(180, 90, 30) : MAKE_COLORREF(60, 60, 70);
+	draw_roundrectfill(180, 2, 65, 46, 6, pill_bg);
+	draw_thermo_icon(193, 11, MAKE_COLORREF(255, 255, 255));
+	sprintf(buf, "%d", bed_status.heat_level);
+	egl_font_set_color(g_pFont28, MAKE_COLORREF(255, 255, 255));
+	bmpfont_draw(g_pFont28, 215, 11, buf);
+
+	pill_bg = bed_status.volume_level > 0 ?
+		MAKE_COLORREF(40, 100, 160) : MAKE_COLORREF(60, 60, 70);
+	draw_roundrectfill(249, 2, 64, 46, 6, pill_bg);
+	draw_speaker_icon(260, 12, MAKE_COLORREF(255, 255, 255));
+	sprintf(buf, "%d", bed_status.volume_level);
+	bmpfont_draw(g_pFont28, 286, 11, buf);
+
+	// 돌봄케어 타이틀 (오렌지)
+	draw_roundrectfill(5, 55, 310, 50, 8, MAKE_COLORREF(220, 130, 60));
+	egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
+	draw_text_kr(g_pFontKor, 104, 66, "돌봄케어");
+
+	// 3개 모드 버튼 — 전체 폭 확장
+	for(i = 0; i < 3; i++) {
+		int y = 125 + i * 80;
+		U32 bg = (cursor.type == i) ?
+			MAKE_COLORREF(255, 230, 80) : MAKE_COLORREF(230, 230, 230);
+		U32 tc = MAKE_COLORREF(20, 25, 38);
+		draw_roundrectfill(5, y, 310, 70, 8, bg);
+		egl_font_set_color(g_pFontKor, tc);
+		draw_text_kr(g_pFontKor, 104, y + 21, care_labels[i]);
+	}
+
+	// 경고 텍스트
+	egl_font_set_color(g_pFontKor16, MAKE_COLORREF(255, 180, 100));
+	draw_text_kr(g_pFontKor16, 30, 395, "돌봄케어 진행 시");
+	draw_text_kr(g_pFontKor16, 30, 415, "작동중인 모드는 종료됩니다.");
+
+	// 푸터
+	egl_font_set_color(g_pFontKor16, MAKE_COLORREF(200, 200, 200));
+	draw_text_kr(g_pFontKor16, 70, 460, "돌봄케어 버튼 : 홈으로");
+
+	flip();
+}
+
+void patient_care_draw_legacy(void)
 {
 	set_draw_target(getbackframe());
 	draw_surface(btm2_img, 0, 0);
 	draw_surface(patient_title_img, TITLE_X, TITLE_Y);
 	draw_surface(patient_main_icon_img, MAIN_ICON_X, MAIN_ICON_Y);
+
+	// --- 3개 탭 버튼 ---
 
 	// 머리감기 버튼
 	if(cursor.type == PATIENT_HEAD)
@@ -1436,11 +2197,64 @@ void patient_care_draw(void)
 	else
 		draw_surface(patient_defec_img, CARE_BTN2_X, LEVIT_SUB_Y);
 
-	// 메인 이미지
-	if(cursor.type == PATIENT_HEAD)
-		draw_surface(patient_head_main_img, PATIENT_MAIN_IMG_X, PATIENT_MAIN_IMG_Y);
+	// 틸팅 버튼 (이동 이미지 재활용 — 추후 틸팅 전용 이미지로 교체)
+	if(cursor.type == PATIENT_TILT)
+	{
+		if(running_flag)
+			draw_surface(patient_defec_sel_img, CARE_BTN3_X, LEVIT_SUB_Y);
+		else
+		{
+			draw_surface(patient_defec_img, CARE_BTN3_X, LEVIT_SUB_Y);
+			draw_roundrect(CARE_BTN3_X, LEVIT_SUB_Y, patient_defec_img->w, patient_defec_img->h, 10, MAKE_COLORREF(255,255,255));
+		}
+	}
 	else
+		draw_surface(patient_defec_img, CARE_BTN3_X, LEVIT_SUB_Y);
+
+	// --- 서브스크린: 모드별 조그 UI ---
+	U32 arrow_color = MAKE_COLORREF(50, 120, 220);
+	U32 arrow_dim   = MAKE_COLORREF(30, 60, 110);
+
+	if(cursor.type == PATIENT_HEAD)
+	{
+		// 머리감기: 침대 이미지 + 위아래 화살표
+		draw_surface(patient_head_main_img, PATIENT_MAIN_IMG_X, PATIENT_MAIN_IMG_Y);
+		if(running_flag){
+			draw_triangle_up(CARE_ARROW_CX, CARE_ARROW_UP_Y, CARE_ARROW_SIZE, arrow_color);
+			draw_triangle_down(CARE_ARROW_CX, CARE_ARROW_DN_Y, CARE_ARROW_SIZE, arrow_color);
+			// "▲▼ 높이 조절" 안내
+			egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
+			draw_text_kr(g_pFontKor, 100, 360, "높이 조절");
+		}
+	}
+	else if(cursor.type == PATIENT_MEAL)
+	{
+		// 식사: 침대 이미지 + 위아래 화살표 (등판)
 		draw_surface(patient_shift_main_img, PATIENT_MAIN_IMG_X, PATIENT_MAIN_IMG_Y);
+		if(running_flag){
+			draw_triangle_up(CARE_ARROW_CX, CARE_ARROW_UP_Y, CARE_ARROW_SIZE, arrow_color);
+			draw_triangle_down(CARE_ARROW_CX, CARE_ARROW_DN_Y, CARE_ARROW_SIZE, arrow_color);
+			egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
+			draw_text_kr(g_pFontKor, 90, 360, "등판 각도 조절");
+		}
+	}
+	else if(cursor.type == PATIENT_TILT)
+	{
+		// 틸팅: 침대 이미지 + 좌우 화살표
+		draw_surface(patient_shift_main_img, PATIENT_MAIN_IMG_X, PATIENT_MAIN_IMG_Y);
+		if(running_flag){
+			draw_triangle_left(CARE_ARROW_LT_X, CARE_ARROW_LR_Y, CARE_ARROW_SIZE, arrow_color);
+			draw_triangle_right(CARE_ARROW_RT_X, CARE_ARROW_LR_Y, CARE_ARROW_SIZE, arrow_color);
+			egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
+			draw_text_kr(g_pFontKor, 90, 400, "틸팅 각도 조절");
+		}
+	}
+
+	// 일시정지 표시
+	if(running_flag && care_paused){
+		egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 200, 0));
+		draw_text_kr(g_pFontKor, 110, 450, "일시정지");
+	}
 
 	flip();
 }
@@ -2288,9 +3102,10 @@ void manual_selft_test_draw(void){
 
 // 탭 버튼 좌표
 #define POSTURE_TAB_Y		55
-#define POSTURE_TAB_X0		10		// 등판
-#define POSTURE_TAB_X1		110		// 다리판
-#define POSTURE_TAB_X2		210		// 등/다리
+#define POSTURE_TAB_X0		5		// 등판
+#define POSTURE_TAB_X1		80		// 다리판
+#define POSTURE_TAB_X2		155		// 등/다리
+#define POSTURE_TAB_X3		235		// 높이
 
 // 아이콘 좌표
 #define POSTURE_ICON_X		50
@@ -2356,7 +3171,8 @@ void posture_proc(void)
 			// 모터 전체 정지 (안전)
 			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
 			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
-			debugprintf("\n\r POSTURE: ALL STOP");
+			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
+			debugprintf("\n\r POSTURE: ALL STOP (incl height)");
 			break;
 	}
 	remocon_key.key_val = 0xFF;
@@ -2385,6 +3201,12 @@ void posture_draw(void)
 	else
 		draw_surface(posture_all_plate_img, POSTURE_TAB_X2, POSTURE_TAB_Y);
 
+	// 높이 탭 (이미지 재활용 — 추후 전용 이미지로 교체)
+	if(cursor.type == POSTURE_HEIGHT)
+		draw_surface(posture_all_plate_a_img, POSTURE_TAB_X3, POSTURE_TAB_Y);
+	else
+		draw_surface(posture_all_plate_img, POSTURE_TAB_X3, POSTURE_TAB_Y);
+
 	// 침대 아이콘 (선택된 판에 해당하는 아이콘)
 	switch(cursor.type){
 		case POSTURE_BACK:
@@ -2395,6 +3217,12 @@ void posture_draw(void)
 			break;
 		case POSTURE_ALL:
 			draw_surface(posture_all_plate_icon_img, POSTURE_ICON_X, POSTURE_ICON_Y);
+			break;
+		case POSTURE_HEIGHT:
+			draw_surface(posture_all_plate_icon_img, POSTURE_ICON_X, POSTURE_ICON_Y);
+			// 높이 안내 텍스트
+			egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
+			draw_text_kr(g_pFontKor, 110, 340, "높이 조절");
 			break;
 	}
 
