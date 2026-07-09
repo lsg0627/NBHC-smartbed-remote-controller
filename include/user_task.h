@@ -13,6 +13,7 @@ typedef enum{
 	MODE_POSTURE,				// 자세제어
 	MODE_SHUTDOWN,				// 종료 화면
 	MODE_FALL_ALERT,			// 낙상 경고 화면
+	MODE_STARTUP_CONFIRM,		// 부팅 확인창 (startup_pending=1)
 	MODE_MAX
 }_status;
 
@@ -156,6 +157,28 @@ extern bool stdby_in_progress;	// 초기위치 복귀 중 (키 차단)
 extern bool power_off_pending;	// ACK 후 전원 OFF 필요
 extern bool stdby_complete;		// ESP32 ACK 수신 플래그
 extern U32 stdby_timeout;		// 타임아웃 카운터
+
+// 홈 타임아웃 (100ms 틱). Master watchdog 90s + 브로드캐스트 2s + 마진 20s.
+// 90s(900)로 잡으면 Master 복구 브로드캐스트 도착 전에 발화하여 경합함.
+#define STDBY_TIMEOUT_TICKS		1100
+
+// --- 부팅 확인창 (docs/remote_firmware_spec.md §5) ---
+extern bool startup_confirm_active;	// 확인창 표시 중 (키 차단)
+extern U32  conform_hold_cnt;		// CONFORM 키 홀드 카운터 (LONG_KEY_CNT=300 → ~3초)
+extern void startup_confirm_accept(void);	// 3초 확인 완료 → CMD2_STDBY 송신
+
+// --- 부팅 시 GetBedStatus 요청 (§3) ---
+extern bool boot_status_done;		// 요청 절차 종료 (응답 수신 or fallback)
+extern U8   boot_status_retry;		// 남은 재시도 횟수
+extern U32  boot_status_wait;		// 응답 대기 (100ms 틱, 2 = 200ms)
+
+// --- 통신 끊김 감지 (§7) ---
+extern U32  bed_status_silence;		// 마지막 BedStatus 이후 경과 (100ms 틱)
+extern bool link_lost;				// 4.5초 이상 무수신
+#define LINK_LOST_TICKS			45	// 45 × 100ms = 4.5초 (브로드캐스트 2주기)
+
+// --- Path B / §5.4 전이 감지용 이전 값 ---
+extern U8 prev_startup_pending;
 
 // 5초 무입력 자동 홈 복귀 타이머 (동작 중 모드 있을 때만 동작)
 extern U32 auto_home_timer;		// 10ms 틱 카운트다운 (50 = 5초)

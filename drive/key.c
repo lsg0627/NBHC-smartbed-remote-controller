@@ -193,6 +193,9 @@ void key_read(void){
 					// stdby_in_progress 잔여 플래그 클리어 (혹시 다른 경로로 켜진 경우)
 					stdby_in_progress = false;
 					power_off_pending = false;
+					// 확인창 중 롱클릭 = 확인 취소 + 전원 OFF (spec §5.2.1)
+					startup_confirm_active = false;
+					conform_hold_cnt = 0;
 					remocon_power_ctrl(REMO_LCD_OFF);
 					power = false;
 					remocon_key.run = true;
@@ -217,12 +220,18 @@ void key_read(void){
 			power_release_cnt = 0;
 			power_hold_cnt = 0;
 			// 숏클릭(누르고 뗌) → "종료중"/"초기화중" 표시 + STDBY 명령 송신
-			if(!power_key_long){
+			// 단, 확인창 중에는 차단한다. 막지 않으면 3초 확인을 거치지 않고 홈이 나간다 (spec §5.2.1).
+			if(!power_key_long && startup_confirm_active){
+				debugprintf("\n\r KEY : POWER SHORT ignored (startup confirm active)");
+			}
+			else if(!power_key_long){
 				debugprintf("\n\r KEY : POWER SHORT RELEASE -> STDBY HOME");
 				U8 tmp = 0;
 				stdby_in_progress = true;
 				stdby_complete = false;
-				stdby_timeout = 300;	// 30초 fallback
+				// Master watchdog(90s)보다 길어야 한다. 30초면 정상 홈 도중 발화해
+				// run_state를 강제 0으로 만들고 "대기중"을 표시한다 (spec §8).
+				stdby_timeout = STDBY_TIMEOUT_TICKS;
 				stdby_initial_mode = bed_status.current_mode;
 				bed_state_lock_remain = 100;	// 2초 잠금
 				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_STDBY, &tmp, 0);
@@ -234,6 +243,32 @@ void key_read(void){
 			remocon_key.run = true;
 			return;
 		}
+	}
+
+	// ---- 부팅 확인창: CONFORM 3초 long-press만 유효 (spec §5.2.1, §6) ----
+	// 전원키는 위 블록에서 처리된다 (숏클릭 차단, 롱클릭=취소+OFF).
+	// 나머지 키는 전부 무시한다. 우발적 클릭으로 침대가 움직이면 안 된다.
+	// 낙상 경고 중에는 확인창보다 낙상 처리가 우선한다 (spec §9, T8).
+	// 여기서 return하면 낙상 해제 키(Pause)까지 막히므로 반드시 제외한다.
+	if(startup_confirm_active && power == true &&
+	   smart_bed_status.status != MODE_FALL_ALERT){
+		bool conform_held = !(remocon_key.current & CONFORM_KEY);
+		if(conform_held){
+			if(conform_hold_cnt < LONG_KEY_CNT){
+				conform_hold_cnt++;
+				smart_bed_display.display_refresh = true;	// progress bar 갱신
+				if(conform_hold_cnt >= LONG_KEY_CNT){
+					debugprintf("\n\r CONFIRM : 3s hold complete");
+					startup_confirm_accept();
+				}
+			}
+		} else if(conform_hold_cnt != 0){
+			debugprintf("\n\r CONFIRM : released early -> progress reset");
+			conform_hold_cnt = 0;
+			smart_bed_display.display_refresh = true;
+		}
+		remocon_key.run = true;
+		return;
 	}
 
 	// 초기위치 복귀 중에도 키 입력 허용 (위에서 자동 캔슬됨)

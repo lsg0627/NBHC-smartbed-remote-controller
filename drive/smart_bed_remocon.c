@@ -498,6 +498,64 @@ void fall_alert_draw(void)
 	flip();
 }
 
+// 부팅 확인창 (spec §6)
+// startup_pending=1 → 사용자가 확인 키를 3초간 눌러야 홈이 시작된다.
+// 우발적 클릭 방지가 목적이므로 단일 클릭으로 진행시키면 안 된다.
+void startup_confirm_draw(void)
+{
+	int i;
+	int filled;
+
+	set_draw_target(getbackframe());
+
+	draw_rectfill(0, 0, 320, 480, MAKE_COLORREF(0, 0, 0));
+
+	// 상단 주황색 경고 띠
+	draw_rectfill(0, 60, 320, 6, MAKE_COLORREF(230, 150, 30));
+
+	egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 200, 60));
+	draw_text_kr(g_pFontKor, 44, 110, "침대를 시작합니다");
+
+	egl_font_set_color(g_pFontKor16, MAKE_COLORREF(200, 200, 200));
+	draw_text_kr(g_pFontKor16, 30, 190, "환자가 침대에서 편안한");
+	draw_text_kr(g_pFontKor16, 30, 220, "위치에 있는지 확인해");
+	draw_text_kr(g_pFontKor16, 30, 250, "주세요.");
+
+	// 확인 안내 박스
+	draw_roundrectfill(24, 320, 272, 110, 10, MAKE_COLORREF(30, 30, 30));
+	egl_font_set_color(g_pFontKor16, MAKE_COLORREF(255, 255, 255));
+	draw_text_kr(g_pFontKor16, 46, 340, "[확인]을 3초간 누르세요");
+
+	// 진행 바 — 10칸. LONG_KEY_CNT(300) 기준으로 채운다.
+	filled = (int)((conform_hold_cnt * 10) / LONG_KEY_CNT);
+	if(filled > 10) filled = 10;
+	for(i = 0; i < 10; i++){
+		int cx = 50 + i * 24;
+		if(i < filled)
+			draw_roundrectfill(cx, 390, 14, 14, 7, MAKE_COLORREF(230, 150, 30));
+		else
+			draw_roundrectfill(cx, 390, 14, 14, 7, MAKE_COLORREF(70, 70, 70));
+	}
+
+	flip();
+}
+
+// 통신 끊김 화면 (spec §7) — 브로드캐스트 4.5초 미수신
+void link_check_draw(void)
+{
+	set_draw_target(getbackframe());
+
+	draw_rectfill(0, 0, 320, 480, MAKE_COLORREF(0, 0, 0));
+
+	egl_font_set_color(g_pFontKor, MAKE_COLORREF(220, 220, 220));
+	draw_text_kr(g_pFontKor, 62, 200, "연결 확인 중");
+
+	egl_font_set_color(g_pFontKor16, MAKE_COLORREF(140, 140, 140));
+	draw_text_kr(g_pFontKor16, 60, 270, "잠시만 기다려 주세요");
+
+	flip();
+}
+
 // 설정 모드 표시 바 (임시 비활성)
 static void draw_mode_indicator(void)
 {

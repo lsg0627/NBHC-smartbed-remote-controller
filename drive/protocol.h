@@ -40,6 +40,7 @@
 #define CMD2_PWR_OFF 0x81	// POWER OFF
 #define CMD2_INIT	0xFF	// 초기화 confirm(처음 키에 입력시)
 #define CMD2_STDBY	0xF0	// 초기화 실시
+#define CMD2_GET_BED_STATUS	0xF1	// 침대 상태 즉시 요청 (부팅 시, Master v3.2.5+)
 
 #define CMD2_DISPERSION	0x20	// 체압분산
 
@@ -82,6 +83,10 @@
 #define CMD2_FALL_ALERT		0xA0	// 낙상 경고 발생
 #define CMD2_FALL_CLEAR		0xA1	// 낙상 경고 해제
 
+// 낙상 감지 기능이 아직 동작하지 않아 경고 화면을 띄우지 않는다.
+// 기능이 살아나면 1로 바꾸면 된다 — 관련 로직(키 게이팅, 확인창 우선순위)은 그대로 남겨둠.
+#define FALL_ALERT_UI_ENABLED	0
+
 // // ------- DATA ----------
 // #define DATA_HEAD	0x10
 // #define DATA_UPBODY	0x20
@@ -109,9 +114,10 @@ typedef struct {
 	U8 leg_panel_percent;  // [3] 다리판 각도 (0~100%)
 	U8 heat_level;         // [4] 히터 (0=OFF, 1=약, 2=중, 3=강)
 	U8 volume_level;       // [5] 볼륨 (0=Mute, 1=Low, 2=Mid, 3=Max)
-	U8 fall_state;         // [6] 낙상 (0=정상, 1=주의, 2=경고, 3=알람)
+	U8 fall_state;         // [6] 낙상 (0=정상, 1=주의, 2=경고, 3=알람) — 리모컨 미사용 (MODE_FALL_ALERT로 관리)
 	U8 powered_on;         // [7] 전원 (0=OFF, 1=ON)
-	U8 reserved[2];        // [8-9] 예약
+	U8 startup_pending;    // [8] 0=정상, 1=사용자 확인 필요 (Master v3.2.4+). 확인창의 단일 진실 원천
+	U8 reserved;           // [9] 예약
 } BED_STATUS_DATA;
 
 extern BED_STATUS_DATA bed_status;  // 전역 상태 (protocol.c에서 갱신)

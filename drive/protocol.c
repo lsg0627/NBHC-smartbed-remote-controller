@@ -649,16 +649,35 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 						}
 					}
 					else if(buff[ACTI_D + i] == CMD2_FALL_ALERT){
+#if FALL_ALERT_UI_ENABLED
 						smart_bed_status.status = MODE_FALL_ALERT;
 						smart_bed_display.status = MODE_FALL_ALERT;
 						smart_bed_display.display_refresh = true;
 						debugprintf("\n\r *** FALL ALERT ***");
+#else
+						// 낙상 기능 미동작 — 화면 전환 없이 로그만 남긴다 (protocol.h: FALL_ALERT_UI_ENABLED)
+						debugprintf("\n\r *** FALL ALERT (UI disabled) ***");
+#endif
 					}
 					else if(buff[ACTI_D + i] == CMD2_FALL_CLEAR){
-						smart_bed_status.status = MODE_HOME;
-						smart_bed_display.status = MODE_HOME;
-						smart_bed_display.display_refresh = true;
-						debugprintf("\n\r FALL ALERT CLEARED");
+						// 낙상 경고 화면일 때만 반응한다. 그 외 모드에서 화면을 뺏으면 안 된다.
+						// (FALL_ALERT_UI_ENABLED=0이면 이 조건이 성립하지 않아 무시된다.)
+						if(smart_bed_status.status == MODE_FALL_ALERT){
+							// 낙상 경고 중 확인창이 보류되어 있었으면 그쪽으로 복귀 (spec T8)
+							if(startup_confirm_active){
+								smart_bed_status.status = MODE_STARTUP_CONFIRM;
+								smart_bed_display.status = MODE_STARTUP_CONFIRM;
+								conform_hold_cnt = 0;
+								debugprintf("\n\r FALL ALERT CLEARED -> back to startup confirm");
+							} else {
+								smart_bed_status.status = MODE_HOME;
+								smart_bed_display.status = MODE_HOME;
+								debugprintf("\n\r FALL ALERT CLEARED");
+							}
+							smart_bed_display.display_refresh = true;
+						} else {
+							debugprintf("\n\r FALL CLEAR ignored (not in fall alert)");
+						}
 					}
 					break;
 				case CMD1_DATA_SYNC:	// ESP32 → 리모컨 설정 동기화
@@ -700,7 +719,12 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 						U8 final_mode, final_state;
 						U8 prev_mode = bed_status.current_mode;
 						U8 prev_state = bed_status.run_state;
+						U8 prev_pending = prev_startup_pending;
 						memcpy(&new_status, &buff[i + LENGTH + 1], sizeof(BED_STATUS_DATA));
+
+						// GetBedStatus 응답 or 브로드캐스트 — 둘 다 여기로 온다 (spec §3)
+						boot_status_done = true;
+						bed_status_silence = 0;		// 끊김 감지 리셋 (§7)
 						// 로컬 상태 잠금 — ESP32가 로컬 상태 확인할 때까지 mode/state 보호
 						if(bed_state_lock_remain > 0){
 							if(new_status.current_mode == bed_status.current_mode &&
@@ -716,6 +740,49 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 						debugprintf("\n\r [RX] ESP32: mode=0x%02x state=%d | applied: mode=0x%02x state=%d (lock=%d)",
 							esp_mode, esp_state, final_mode, final_state, bed_state_lock_remain);
 						memcpy(&bed_status, &new_status, sizeof(BED_STATUS_DATA));
+
+						// ================= 부팅 확인창 관련 전이 (spec §5.3 / §5.4) =================
+						// 주의: bed_state_lock_remain은 mode/state만 덮어쓰고 startup_pending은 통과시킨다.
+						//
+						// [1] pending 0→1 : Master watchdog 복구 또는 Master 재부팅.
+						//     watchdog 복구는 run_state 3→0 과 pending 0→1 을 같은 패킷에 실어 보낸다.
+						//     그래서 반드시 Path B보다 먼저 평가해야 한다. 순서를 바꾸면
+						//     watchdog 복구를 홈 완료로 오인하여 확인창 대신 일반 UI로 들어간다.
+						if(prev_pending == 0 && bed_status.startup_pending == 1){
+							debugprintf("\n\r [PENDING] 0->1 (master reboot or watchdog) -> confirm required");
+							stdby_in_progress = false;
+							stdby_complete = false;
+							stdby_timeout = 0;
+							if(power){
+								startup_confirm_active = true;
+								conform_hold_cnt = 0;
+								// 낙상 경고가 떠 있으면 그 화면이 우선 (spec §9, T8).
+								// 확인창은 낙상 해제(CMD2_FALL_CLEAR) 후에 표시된다.
+								if(smart_bed_status.status != MODE_FALL_ALERT){
+									smart_bed_status.status = MODE_STARTUP_CONFIRM;
+									smart_bed_display.status = MODE_STARTUP_CONFIRM;
+								}
+							}
+							// power==false(LCD OFF)면 플래그만 유지. 다음 전원키 누름에서 확인창 진입.
+						}
+						// [2] Path B — 브로드캐스트로 홈 완료 감지.
+						//     stdby_in_progress를 가드에 넣지 말 것. 이 경로가 필요한 두 경우 모두
+						//     그 값이 false다: (a) 리모컨이 STDBY를 보내지 않음(홈 중 재부팅),
+						//     (b) 돌봄케어 모드 중 홈 — Master가 ActionEcho를 아예 보내지 않는다.
+						else if(prev_state == 3 && final_state == 0 && bed_status.startup_pending == 0){
+							if(stdby_in_progress){
+								debugprintf("\n\r [PATH B] run_state 3->0 -> homing done");
+								stdby_in_progress = false;
+								stdby_complete = false;
+								stdby_timeout = 0;
+							}
+							if(smart_bed_status.status == MODE_STARTUP_CONFIRM){
+								startup_confirm_active = false;
+								smart_bed_status.status = MODE_HOME;
+								smart_bed_display.status = MODE_HOME;
+							}
+						}
+						prev_startup_pending = bed_status.startup_pending;
 
 						// pending_pwr_on_check: REMO_PWR_ON에서 bed_status 기반으로 즉시 결정 (불필요)
 

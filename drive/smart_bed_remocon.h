@@ -126,6 +126,13 @@ enum {
 extern void posture_proc(void);
 extern void posture_draw(void);
 
+// 낙상 경고 화면
+extern void fall_alert_draw(void);
+
+// 부팅 확인창 / 통신 끊김 화면 (docs/remote_firmware_spec.md §6, §7)
+extern void startup_confirm_draw(void);
+extern void link_check_draw(void);
+
 // 상태 오버레이 (홈 화면 등에서 호출)
 extern void draw_status_overlay(void);
 

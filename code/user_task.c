@@ -60,6 +60,25 @@ U32 pending_pwr_on_check_timeout = 0;	// 100ms 틱 단위 (30 = 3초)
 bool awaiting_homing_start = false;
 U32 awaiting_homing_timeout = 0;	// 100ms 틱 단위 (50 = 5초)
 
+// --- 부팅 확인창 (docs/remote_firmware_spec.md §5) ---
+// startup_pending=1이면 확인 없이 홈을 돌리지 않는다. LCD가 꺼진 부팅 시점이 아니라
+// 사용자가 전원키를 눌러 power=true가 되는 시점에 확인창을 띄운다.
+bool startup_confirm_active = false;
+U32  conform_hold_cnt = 0;
+
+// --- 부팅 시 GetBedStatus(0xF1) 요청 (§3) ---
+// LCD가 꺼진 상태에서도 송신한다. 3회 실패하면 브로드캐스트 대기로 fallback.
+bool boot_status_done = false;
+U8   boot_status_retry = 3;
+U32  boot_status_wait = 0;
+
+// --- 통신 끊김 감지 (§7) ---
+U32  bed_status_silence = 0;
+bool link_lost = false;
+
+// --- 전이 감지용 이전 값 (Path B / §5.4) ---
+U8 prev_startup_pending = 0;
+
 // 마사지 모드 사이클 타이머 (1회 측정 시간 기준, 한 사이클 끝나면 wrap)
 U32 massage_timer_elapsed_ms = 0;	// 누적 ms (100ms 틱마다 +100)
 U8 massage_timer_mode = 0xFF;		// 0~11: 마사지 인덱스, 0xFF: 비활성
@@ -225,6 +244,36 @@ void process_target_time_handler(void){
 			if(spinner_shown){
 				loading_anim_phase = (loading_anim_phase + 1) & 7;
 				smart_bed_display.display_refresh = true;
+			}
+		}
+
+		// --- 부팅 시 GetBedStatus 요청 (spec §3) ---
+		// 200ms(2틱) 대기 × 최대 3회. 실패해도 브로드캐스트로 진입하므로 무해.
+		// CMD1은 반드시 CMD1_SEND_RUN_ST(0x10). 0x01이면 Master가 조용히 무시한다.
+		if(!boot_status_done){
+			if(boot_status_wait > 0){
+				boot_status_wait--;
+			} else if(boot_status_retry > 0){
+				U8 tmp = 0;
+				boot_status_retry--;
+				debugprintf("\n\r [BOOT] TX GetBedStatus (0x10,0xF1) retry_left=%d", boot_status_retry);
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_GET_BED_STATUS, &tmp, 0);
+				boot_status_wait = 2;	// 200ms
+			} else {
+				debugprintf("\n\r [BOOT] GetBedStatus no reply -> fallback to broadcast");
+				boot_status_done = true;
+			}
+		}
+
+		// --- 통신 끊김 감지 (spec §7) ---
+		// 브로드캐스트 주기 2초. 2주기(4.5초) 미수신이면 "연결 확인 중".
+		if(bed_status_silence < 0xFFFF) bed_status_silence++;
+		{
+			bool lost_now = (bed_status_silence >= LINK_LOST_TICKS);
+			if(lost_now != link_lost){
+				link_lost = lost_now;
+				smart_bed_display.display_refresh = true;
+				debugprintf("\n\r [LINK] %s", link_lost ? "LOST" : "RESTORED");
 			}
 		}
 
@@ -757,6 +806,28 @@ void remocon_power_ctrl(U8 remo_pwr)
 			// 리모컨 OFF 상태에서도 main loop가 BED_STATUS를 계속 수신하여 bed_status는 최신 상태.
 			// 침대가 idle(mode=0 && state=0)일 때만 CMD2_PWR_ON 송신.
 			// 동작 중(mode≠0, state=1/2) 또는 초기화 중(state=3)이면 송신 안 함 → 동작 유지.
+			pending_pwr_on_check = false;
+			pending_pwr_on_check_timeout = 0;
+			remo_pwr_st = REMO_LCD_ON;
+			stdby_in_progress = false;
+			power_off_pending = false;
+
+			// startup_pending=1이면 Master가 InitializeAction 외 모든 명령을 거부한다.
+			// CMD2_PWR_ON을 보내봐야 무시당하고 5초 스피너 후 무반응이 된다 (spec §5.1).
+			// 대신 확인창을 띄우고, 3초 확인 후 CMD2_STDBY를 보낸다.
+			if(bed_status.startup_pending){
+				debugprintf("\n\r [PWR_ON] startup_pending=1 -> suppress CMD2_PWR_ON, show confirm");
+				startup_confirm_active = true;
+				conform_hold_cnt = 0;
+				show_loading_screen = false;
+				awaiting_homing_start = false;
+				smart_bed_status.status = MODE_STARTUP_CONFIRM;
+				smart_bed_display.status = MODE_STARTUP_CONFIRM;
+				smart_bed_display.display_refresh = true;
+				LCD_ON();
+				break;
+			}
+
 			if(bed_status.current_mode == 0 && bed_status.run_state == 0){
 				debugprintf("\n\r [PWR_ON] bed idle -> send CMD2_PWR_ON");
 				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PWR_ON, &tmp, 0);
@@ -766,13 +837,8 @@ void remocon_power_ctrl(U8 remo_pwr)
 				debugprintf("\n\r [PWR_ON] bed running (mode=0x%02x state=%d) -> skip PWR_ON",
 					bed_status.current_mode, bed_status.run_state);
 			}
-			pending_pwr_on_check = false;
-			pending_pwr_on_check_timeout = 0;
-			remo_pwr_st = REMO_LCD_ON;
 			smart_bed_status.status = MODE_HOME;
 			smart_bed_display.display_refresh = true;
-			stdby_in_progress = false;
-			power_off_pending = false;
 			// PDF 슬라이드 3: 로딩 화면 (boot.suf) 표시 → 약 3초 후 자동 홈 전환
 			show_loading_screen = true;
 			loading_remain = 30;	// process_target_time_handler 틱 기준 (~3초)
@@ -800,6 +866,30 @@ void remocon_power_ctrl(U8 remo_pwr)
 			stdby_timeout = 6000;	// ~60초 타임아웃 (10ms × 6000)
 			break;
 	}
+}
+
+// 부팅 확인창에서 3초 확인이 끝났을 때 (spec §5.2)
+// stdby_timeout과 stdby_in_progress를 반드시 함께 세팅한다.
+// stdby_timeout 전역 초기값이 0이라 in_progress만 켜면 다음 틱에 즉시 타임아웃 처리된다.
+void startup_confirm_accept(void)
+{
+	U8 tmp = 0;
+
+	startup_confirm_active = false;
+	conform_hold_cnt = 0;
+
+	stdby_timeout = STDBY_TIMEOUT_TICKS;
+	stdby_in_progress = true;
+	stdby_complete = false;
+	stdby_initial_mode = 0;		// idle에서 시작 → "초기화 중" 표기
+	power_off_pending = false;
+
+	debugprintf("\n\r [CONFIRM] accepted -> TX CMD2_STDBY (0x10,0xF0)");
+	esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_STDBY, &tmp, 0);
+
+	smart_bed_status.status = MODE_HOME;
+	smart_bed_display.status = MODE_HOME;
+	smart_bed_display.display_refresh = true;
 }
 
 // 초기위치 복귀 진행 상태 확인 (메인 루프에서 매 사이클 호출)
@@ -913,6 +1003,23 @@ void process_analy_data(){
 }
 
 void progress_lcd_display(void){
+	// 통신 끊김 오버레이 (spec §7). 낙상 경고와 확인창이 우선.
+	// 원래 모드를 잃지 않도록 smart_bed_display.status를 건드리지 않는다.
+	static bool link_screen_shown = false;
+	if(power && link_lost &&
+	   smart_bed_status.status != MODE_FALL_ALERT && !startup_confirm_active){
+		if(!link_screen_shown){
+			link_check_draw();
+			link_screen_shown = true;
+		}
+		smart_bed_display.display_refresh = false;
+		return;
+	}
+	if(link_screen_shown){
+		link_screen_shown = false;
+		smart_bed_display.display_refresh = true;	// 원래 화면 복원
+	}
+
 	if(smart_bed_display.display_refresh == true){
 		switch(smart_bed_display.status){
 			case MODE_HOME: // home
@@ -947,6 +1054,9 @@ void progress_lcd_display(void){
 				break;
 			case MODE_FALL_ALERT:
 				fall_alert_draw();
+				break;
+			case MODE_STARTUP_CONFIRM:
+				startup_confirm_draw();
 				break;
 		}
 
