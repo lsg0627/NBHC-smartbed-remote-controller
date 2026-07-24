@@ -552,8 +552,8 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 					memcpy(bar, &buff[i+LENGTH+1], buff[LENGTH]);
 					smart_bed_display.display_refresh = true;
 					break;
-				case CMD1_GET_PRESSURE_MAP:	// pressure map (12x7 = 84 bytes)
-					// 유의미한 변화(전체 셀 중 8 이상 차이)가 있을 때만 refresh
+				case CMD1_GET_PRESSURE_MAP:	// pressure map (11x7 = 77 bytes)
+					bed_status_silence = 0;	// 연결 확인 리셋 (link_lost 방지)
 					if(buff[i+LENGTH] >= PRESSURE_MAP_SIZE) {
 						U8 *new_data = &buff[i+LENGTH+1];
 						U8 *old_data = (U8*)pressure_map;
@@ -568,15 +568,15 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 						if(changed) smart_bed_display.display_refresh = true;
 					}
 					break;
-				case CMD1_GET_MOTOR_POSITION:	// 12 모터 위치 (24 bytes, int16 LE)
-					if(buff[i+LENGTH] >= 24) {
+				case CMD1_GET_MOTOR_POSITION:	// 11 모터 위치 (22 bytes, int16 LE)
+					bed_status_silence = 0;	// 연결 확인 리셋
+					if(buff[i+LENGTH] >= 22) {
 						int k;
 						bool changed = false;
-						for(k = 0; k < 12; k++) {
+						for(k = 0; k < 11; k++) {
 							U8 lo = buff[i+LENGTH+1 + k*2];
 							U8 hi = buff[i+LENGTH+1 + k*2 + 1];
 							S16 newp = (S16)(((U16)hi << 8) | lo);
-							// 5 pulse 이상 변화한 경우에만 refresh (작은 변동 무시)
 							S16 diff = newp - motor_positions[k];
 							if(diff < 0) diff = -diff;
 							if(diff >= 5) {
@@ -724,6 +724,7 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 
 						// GetBedStatus 응답 or 브로드캐스트 — 둘 다 여기로 온다 (spec §3)
 						boot_status_done = true;
+						master_booted = true;		// 마스터 부팅 완료 — 부팅 스피너 해제 신호
 						bed_status_silence = 0;		// 끊김 감지 리셋 (§7)
 						// 로컬 상태 잠금 — ESP32가 로컬 상태 확인할 때까지 mode/state 보호
 						if(bed_state_lock_remain > 0){

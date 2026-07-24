@@ -125,6 +125,11 @@ static U32 power_active_frames = 0;	// power_key_active 유지 프레임 수
 void key_read(void){
 	key_proc();
 
+	// 확인창 홀드 상태는 매 사이클 새로 판정한다.
+	// 아래 전원키/스크린샷 처리가 중간에 return하므로, 여기서 먼저 내려두지 않으면
+	// 직전 값이 남아 100ms 틱 쪽에서 계속 카운트가 올라간다.
+	conform_key_held = false;
+
 	// 5초 무입력 자동 홈 복귀 타이머 — 어떤 키든 눌리면 리셋
 	if(remocon_key.current != 0xFFFF) {
 		auto_home_timer = 50;	// 50 × 100ms = 5초
@@ -250,23 +255,20 @@ void key_read(void){
 	// 나머지 키는 전부 무시한다. 우발적 클릭으로 침대가 움직이면 안 된다.
 	// 낙상 경고 중에는 확인창보다 낙상 처리가 우선한다 (spec §9, T8).
 	// 여기서 return하면 낙상 해제 키(Pause)까지 막히므로 반드시 제외한다.
+	// 여기서는 키 상태만 보고한다. 홀드 시간 계산과 화면 갱신은
+	// process_target_time_handler()의 100ms 틱에서 처리한다 (user_task.c).
+	// key_read() 호출 횟수로 시간을 재면 안 된다 — 메인 루프 한 바퀴에
+	// 화면 전체 재그리기가 끼면 루프 주기가 3배 이상 늘어나 3초가 11초가 된다.
 	if(startup_confirm_active && power == true &&
 	   smart_bed_status.status != MODE_FALL_ALERT){
-		bool conform_held = !(remocon_key.current & CONFORM_KEY);
-		if(conform_held){
-			if(conform_hold_cnt < LONG_KEY_CNT){
-				conform_hold_cnt++;
-				smart_bed_display.display_refresh = true;	// progress bar 갱신
-				if(conform_hold_cnt >= LONG_KEY_CNT){
-					debugprintf("\n\r CONFIRM : 3s hold complete");
-					startup_confirm_accept();
-				}
-			}
-		} else if(conform_hold_cnt != 0){
-			debugprintf("\n\r CONFIRM : released early -> progress reset");
-			conform_hold_cnt = 0;
-			smart_bed_display.display_refresh = true;
-		}
+		conform_key_held = !(remocon_key.current & CONFORM_KEY);
+		remocon_key.run = true;
+		return;
+	}
+
+	// 초기화(호밍) 중에는 화면 전환/조작 키를 차단한다. (전원 OFF는 위 홀드 로직에서 이미 처리됨)
+	// 초기화가 끝나면 is_homing_active()==false가 되어 정상적으로 다른 화면으로 전환된다.
+	if(is_homing_active()){
 		remocon_key.run = true;
 		return;
 	}
@@ -288,8 +290,8 @@ void key_read(void){
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_UP, &tmp, 0);
 				if(cursor.type == POSTURE_LEG || cursor.type == POSTURE_ALL)
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_UP, &tmp, 0);
-				if(cursor.type == POSTURE_HEIGHT)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_UP, &tmp, 0);
+				if(cursor.type == POSTURE_GRAVITY)	// 무중력: 프리셋 1회 전송 (메인보드 자동 이동, 홀드 아님)
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_GRAVITY, &tmp, 0);
 				debugprintf("\n\r POSTURE: MOTOR UP (type=%d)", cursor.type);
 			}
 			// UP 키 뗌 → 모터 정지
@@ -299,8 +301,7 @@ void key_read(void){
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
 				if(cursor.type == POSTURE_LEG || cursor.type == POSTURE_ALL)
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
-				if(cursor.type == POSTURE_HEIGHT)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
+				// 무중력(POSTURE_GRAVITY)은 프리셋 자동 이동이라 뗌 시 정지 명령 없음 (긴급정지는 CONFORM=전체정지)
 				debugprintf("\n\r POSTURE: MOTOR UP STOP");
 			}
 
@@ -311,8 +312,7 @@ void key_read(void){
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_DOWN, &tmp, 0);
 				if(cursor.type == POSTURE_LEG || cursor.type == POSTURE_ALL)
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_DOWN, &tmp, 0);
-				if(cursor.type == POSTURE_HEIGHT)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_DOWN, &tmp, 0);
+				// 무중력 탭은 DOWN 동작 없음 (프리셋 전용, ▲로만 실행)
 				debugprintf("\n\r POSTURE: MOTOR DOWN (type=%d)", cursor.type);
 			}
 			// DOWN 키 뗌 → 모터 정지
@@ -322,8 +322,7 @@ void key_read(void){
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
 				if(cursor.type == POSTURE_LEG || cursor.type == POSTURE_ALL)
 					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
-				if(cursor.type == POSTURE_HEIGHT)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
+				// 무중력 탭은 DOWN 정지 없음
 				debugprintf("\n\r POSTURE: MOTOR DOWN STOP");
 			}
 		} else {

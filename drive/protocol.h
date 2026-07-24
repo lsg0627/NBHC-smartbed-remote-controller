@@ -24,7 +24,7 @@
 #define CMD1_SEND_GET_BAR	0x30
 #define CMD1_BED_STATUS		0x40	// 침대 상태 정보 (주기적 수신)
 #define CMD1_GET_BAR_INFO	0x50	// 요청 (설정 값 요청, 동작 상태 요청 )
-#define CMD1_GET_MOTOR_POSITION	0x52	// 12 모터 위치 (각 int16, 총 24 bytes)
+#define CMD1_GET_MOTOR_POSITION	0x52	// 11 모터 위치 (각 int16, 총 22 bytes)
 #define CMD1_GET_PRESSURE_MAP	0x60	// 체압맵 데이터 수신 (7x10)
 #define CMD1_GET_BODY_INFO	0x70
 #define CMD1_DATA_SYNC		0x80	// ESP32 → 리모컨 설정 동기화
@@ -78,6 +78,7 @@
 #define CMD2_HEIGHT_UP			0x54	// 높이 올림 (모터 13+14)
 #define CMD2_HEIGHT_DOWN		0x55	// 높이 내림
 #define CMD2_HEIGHT_STOP		0x56	// 높이 정지
+#define CMD2_GRAVITY			0x4D	// 무중력 자세 프리셋 (메인보드가 등판+다리판 자동 이동)
 
 // 낙상 경고 (메인보드 → 리모컨)
 #define CMD2_FALL_ALERT		0xA0	// 낙상 경고 발생
@@ -226,9 +227,9 @@ extern BED_STATUS_DATA bed_status;  // 전역 상태 (protocol.c에서 갱신)
 #define REMO_STDBY_OFF 3	// 초기위치 복귀 후 전원 OFF
 
 
-#define PRESSURE_ROWS	12	// 머리 2열 + 본체 10열 (ESP32 NUM_MOTOR_DRIVERS)
+#define PRESSURE_ROWS	11	// ESP32 NUM_MOTOR_DRIVERS (실제 건반 11개, id 0~10)
 #define PRESSURE_COLS	7	// ESP32 NUM_LOAD_CELLS
-#define PRESSURE_MAP_SIZE	(PRESSURE_ROWS * PRESSURE_COLS)	// 84 bytes
+#define PRESSURE_MAP_SIZE	(PRESSURE_ROWS * PRESSURE_COLS)	// 77 bytes
 
 #define GET_INFO_BAR	0
 #define GET_INFO_BODY	1

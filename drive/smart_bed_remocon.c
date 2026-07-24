@@ -12,7 +12,14 @@ U8 body_set_max[BODY_LEVIT_MAX] = {0,};
 U8 bar[16] = {0,};
 bool body_info = false;
 U8 pressure_map[PRESSURE_ROWS][PRESSURE_COLS] = {{0,}};
-S16 motor_positions[12] = {0,};	// ESP32에서 받은 12 모터 위치 (raw pulses, 0~3400)
+S16 motor_positions[11] = {0,};	// ESP32에서 받은 11 모터 위치 (id 0~10, raw pulses)
+
+// 마사지 UI 인덱스 (0~10) → CMD offset (0~10)
+// 메인보드 재배치로 코드번호=슬롯번호가 되어 1:1 매핑, 트위스트(0x3C=offset 11)는 UI 미표시
+static const U8 massage_cmd_offset[MASSAGE_UI_MAX] = {
+	0, 1, 2, 3, 4,       // 파도타기, 지압, 집중, 추나, 스트레칭
+	5, 6, 7, 8, 9, 10    // 트렌델렌버그, 롤링, 호흡, 시소, 무중력, 수면
+};
 BODY levitate[LEVIT_MAX];// 교대 부양(일반/집중/수면)
 BODY dispersion;// 체압분산
 BODY massage[12];	// 마사지
@@ -90,6 +97,20 @@ static void draw_text_kr(EGL_FONT* font, int x, int y, const char* utf8_str)
 	bitfont_draw(font, x, y, euckr);
 }
 
+// 16px 한글 폰트 텍스트 폭 추정 (한글=16, ASCII=8) — 탭 라벨 가운데 정렬용
+static int kr_text_width_16(const char* utf8_str)
+{
+	int width = 0, i = 0;
+	while(utf8_str[i]){
+		U8 c = (U8)utf8_str[i];
+		if(c < 0x80)                 { width += 8;  i += 1; }
+		else if((c & 0xE0) == 0xC0)  { width += 16; i += 2; }
+		else if((c & 0xF0) == 0xE0)  { width += 16; i += 3; }
+		else                         { i += 1; }
+	}
+	return width;
+}
+
 // 종료 화면 그리기 (progress_lcd_display에서 호출)
 void shutdown_draw(void)
 {
@@ -131,13 +152,13 @@ const char* get_mode_name(U8 mode) {
 		case 0x33: return "집중";
 		case 0x34: return "추나";
 		case 0x35: return "스트레칭";
-		case 0x36: return "트위스트";
-		case 0x37: return "트렌델렌버그";
-		case 0x38: return "롤링";
-		case 0x39: return "호흡";
-		case 0x3A: return "시소";
-		case 0x3B: return "무중력";
-		case 0x3C: return "수면";
+		case 0x36: return "트렌델렌버그";
+		case 0x37: return "롤링";
+		case 0x38: return "호흡";
+		case 0x39: return "시소";
+		case 0x3A: return "무중력";
+		case 0x3B: return "수면";
+		case 0x3C: return "트위스트";
 		default:
 			sprintf(buf, "모드(0x%02X)", mode);
 			return buf;
@@ -255,6 +276,16 @@ void draw_loading_spinner(int cx, int cy, U32 phase)
 	}
 }
 
+// 초기화(호밍) 화면 — 등판/다리판/매트리스 등 어떤 축이 초기화 중이든 공통으로 표시.
+// 침대 그림 + 회전 스피너 + 안내 문구. progress_lcd_display에서 모든 화면 위에 오버레이된다.
+void homing_draw(void)
+{
+	set_draw_target(getbackframe());
+	draw_surface(home_img, 0, 0);						// home 이미지(침대 그림, boot.suf)
+	draw_loading_spinner(160, 240, loading_anim_phase);	// 회전 표시(스피너)
+	flip();
+}
+
 // 모래시계 아이콘 ⏳ — 위는 윤곽만, 아래는 모래색으로 채움
 // sz=18 기준: 상단바(2) + 위 삼각형 윤곽(7) + 핀치(1) + 아래 삼각형 채움(6) + 하단바(2)
 static void draw_hourglass_icon(int x, int y, U32 frame_color)
@@ -361,23 +392,42 @@ void draw_status_overlay(void)
 	}
 
 	// ===== 2) 시간 (y=55 ~ y=105, 높이 50) =====
-	// VAIRANCE(0x20) / LEVITATE(0x10/11/12) 모드 활성 시 경과 시간 카운트업,
-	// 그 외에는 "00:00". 박스 가운데 정렬, g_pFont40.
+	// 경과 시간 표시 — 단위가 커지면 상위 단위 추가 노출:
+	//   초기: "00분 00초"
+	//   시간 이상: "H시간 MM분 SS초"
+	//   하루 이상: "D일 H시간 MM분 SS초"
+	//   1년 이상: "Y년 D일 H시간 MM분 SS초"
 	draw_roundrect(5, 55, 310, 50, 8, BORDER);
 	draw_hourglass_icon(15, 71, MAKE_COLORREF(220, 220, 230));
 	{
 		int tw, tx;
-		U32 e = mode_timer_elapsed_ms;
+		U32 total_sec, sec, min, hr, day, yr;
 		if(mode_timer_mode != 0) {
-			sprintf(buf, "%02d:%02d",
-				(int)(e / 60000), (int)((e / 1000) % 60));
+			total_sec = mode_timer_elapsed_ms / 1000;
 		} else {
-			sprintf(buf, "00:00");
+			total_sec = 0;
 		}
-		egl_font_set_color(g_pFont40, MAKE_COLORREF(255, 255, 255));
-		tw = text_width(g_pFont40, buf);
+		sec = total_sec % 60;
+		min = (total_sec / 60) % 60;
+		hr  = (total_sec / 3600) % 24;
+		day = (total_sec / 86400UL) % 365;
+		yr  = total_sec / (86400UL * 365UL);
+		if(yr > 0) {
+			sprintf(buf, "%d년 %d일 %d시간 %02d분 %02d초",
+				(int)yr, (int)day, (int)hr, (int)min, (int)sec);
+		} else if(day > 0) {
+			sprintf(buf, "%d일 %d시간 %02d분 %02d초",
+				(int)day, (int)hr, (int)min, (int)sec);
+		} else if(hr > 0) {
+			sprintf(buf, "%d시간 %02d분 %02d초",
+				(int)hr, (int)min, (int)sec);
+		} else {
+			sprintf(buf, "%02d분 %02d초", (int)min, (int)sec);
+		}
+		egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
+		tw = estimate_text_width_28(buf);
 		tx = 5 + (310 - tw) / 2;
-		bmpfont_draw(g_pFont40, tx, 60, buf);
+		draw_text_kr(g_pFontKor, tx, 66, buf);
 	}
 
 	// ===== 3) 체압 분포 (y=110 ~ y=410) — 범례 공간 확보 위해 축소 =====
@@ -393,17 +443,16 @@ void draw_status_overlay(void)
 		draw_text_kr(g_pFontKor, tx, 116, title);
 	}
 
-	// 측면뷰 침대 하단 (가로 바) — 위 셀 행과 동일 높이(22), 박스 바닥과 2px gap
+	// 측면뷰 침대 하단 (가로 바) — 11 col 폭(262)에 맞춰 가로 가운데 정렬
 	{
 		U32 SHAPE = MAKE_COLORREF(55, 60, 70);
-		draw_roundrectfill(17, 385, 286, 22, 6, SHAPE);
+		draw_roundrectfill(29, 385, 262, 22, 6, SHAPE);
 	}
 
-	// 측면뷰 머리 — 1행 2열 셀, bar[0..1]로 동작 상태 표시
-	// 모터 위치에 따라 셀이 위로 이동 (0=원위치, 1260=gap 중앙(28px), 3400=max(30px))
+	// 측면뷰 머리 — 1행 2열 셀, 가운데 정렬 (hx=29)
 	{
 		int row;
-		int hx = 17, hy = 361;
+		int hx = 29, hy = 361;
 		int cw = 22, ch = 22, gap = 2;
 		for(row = 0; row < 2; row++) {
 			int yo = motor_position_to_offset(motor_positions[row]);
@@ -415,17 +464,20 @@ void draw_status_overlay(void)
 		}
 	}
 
-	// 탑뷰 그리드: 12 col × 7 row (머리 2 + 본체 10), pressure_map[0..11][0..6]
-	// 박스 가운데 정렬 (시작 x=17). 머리(col 0,1)와 메인(col 2~11) 사이 gap=2 유지.
+	// 탑뷰 그리드: 11 col × 7 row (머리 2 + 본체 9), 가로 가운데 정렬
+	// 짝수 id (0, 2, 4, 6, 8, 10)은 load cell 순서 반대로 표시 (물리적 배선 방향 반영)
 	{
 		int row, col;
-		int hx = 17, gx = 65, gy = 152;
+		int hx = 29, gx = 77, gy = 152;
 		int cw = 22, ch = 23, gap = 2;
 		for(row = 0; row < PRESSURE_ROWS; row++) {
 			int x = (row < 2) ? (hx + row * (cw + gap))
 			                  : (gx + (row - 2) * (cw + gap));
+			bool is_even = ((row & 1) == 0);
 			for(col = 0; col < PRESSURE_COLS; col++) {
-				U8 v = pressure_map[row][col];
+				// 짝수 id: 셀 인덱스 반전, 홀수 id: 그대로
+				int cell_idx = is_even ? (PRESSURE_COLS - 1 - col) : col;
+				U8 v = pressure_map[row][cell_idx];
 				draw_roundrectfill(
 					x,
 					gy + col * (ch + gap),
@@ -438,13 +490,14 @@ void draw_status_overlay(void)
 	// 그리드와 바 스트립 사이 구분선 (패널 전체 너비)
 	draw_rectfill(11, 327, 298, 1, MAKE_COLORREF(180, 60, 60));
 
-	// 하단 바 스트립: 10 cells 가로 — bar[2..11]로 본체 모터 동작 상태 표시
-	// motor_positions[2..11]로 셀 vertical offset 계산
+	// 하단 바 스트립: 9 cells 가로 — bar[2..10]로 본체 모터 동작 상태 표시
+	// motor_positions[2..10]로 셀 vertical offset 계산 (id 0~10 중 머리 2 제외)
+	// 가로 가운데 정렬 (bx=77)
 	{
 		int i;
-		int bx = 65, by = 361;
+		int bx = 77, by = 361;
 		int bw = 22, bh = 22, bgap = 2;
-		for(i = 0; i < 10; i++) {
+		for(i = 0; i < 9; i++) {
 			int yo = motor_position_to_offset(motor_positions[i + 2]);
 			draw_roundrectfill(bx + i * (bw + bgap), by - yo, bw, bh, 3,
 				bar[i + 2] ? BAR_ON : BAR_OFF);
@@ -526,10 +579,10 @@ void startup_confirm_draw(void)
 	egl_font_set_color(g_pFontKor16, MAKE_COLORREF(255, 255, 255));
 	draw_text_kr(g_pFontKor16, 46, 340, "[확인]을 3초간 누르세요");
 
-	// 진행 바 — 10칸. LONG_KEY_CNT(300) 기준으로 채운다.
-	filled = (int)((conform_hold_cnt * 10) / LONG_KEY_CNT);
-	if(filled > 10) filled = 10;
-	for(i = 0; i < 10; i++){
+	// 진행 바 — 10칸. 100ms 틱 기준 CONFORM_HOLD_TICKS(30 = 3초)으로 채운다.
+	filled = (int)((conform_hold_cnt * CONFORM_BAR_SEGMENTS) / CONFORM_HOLD_TICKS);
+	if(filled > CONFORM_BAR_SEGMENTS) filled = CONFORM_BAR_SEGMENTS;
+	for(i = 0; i < CONFORM_BAR_SEGMENTS; i++){
 		int cx = 50 + i * 24;
 		if(i < filled)
 			draw_roundrectfill(cx, 390, 14, 14, 7, MAKE_COLORREF(230, 150, 30));
@@ -1695,13 +1748,20 @@ void massage_proc(void){
 		smart_bed_display.display_refresh = true;// 마사지 display
 		memset(&cursor, 0, sizeof(CURSOR));// key init
 		cursor.set_max = 2;
-	    cursor.type_max = MASSAGE_MAX;
+	    cursor.type_max = MASSAGE_UI_MAX;	// UI: 트위스트 제외 11개
 
 		// 동작 중인 마사지가 있으면 해당 마사지로 커서 이동 및 동작 상태 복원
-		// 단, 자연 종료(state=0)된 경우엔 stale running_massage_type 무시하고 START 상태로
+		// running_massage_type은 CMD offset(0~11), UI index로 역매핑 필요
 		if(running_massage_type >= 0 && running_massage_type < MASSAGE_MAX &&
+		   running_massage_type != 11 &&	// 트위스트(0x3C = offset 11) 스킵
 		   bed_status.run_state != 0){
-			cursor.type = running_massage_type;
+			int i;
+			for(i = 0; i < MASSAGE_UI_MAX; i++) {
+				if(massage_cmd_offset[i] == running_massage_type) {
+					cursor.type = i;
+					break;
+				}
+			}
 			if(bed_status.run_state == 2)
 				conform_key_run = CMD3_RESTART;
 			else
@@ -1750,7 +1810,8 @@ void massage_proc(void){
 			remocon_key.key_val = 0xFF;
 			break;
 		case CONFORM_KEY:
-			conform_key_proc(CMD2_MASSAGE + cursor.type);
+			// UI cursor 인덱스를 실제 CMD offset으로 매핑 (트위스트 스킵)
+			conform_key_proc(CMD2_MASSAGE + massage_cmd_offset[cursor.type]);
 			remocon_key.key_val = 0xFF;
 			break;
 		default:
@@ -1864,7 +1925,7 @@ void massage_draw(void){
 		// 1단계: 포커싱 안 된 카드들 먼저 (회색 작은 박스)
 		for(i = 0; i < 5; i++) {
 			if(!draw_arr[i] || i == closest) continue;
-			sprintf(line, "%d. %s", idx_arr[i] + 1, get_mode_name(0x31 + idx_arr[i]));
+			sprintf(line, "%d. %s", idx_arr[i] + 1, get_mode_name(0x31 + massage_cmd_offset[idx_arr[i]]));
 			draw_roundrectfill(40, y_arr[i], 240, 80, 8, MAKE_COLORREF(170, 170, 170));
 			egl_font_set_color(g_pFontKor, MAKE_COLORREF(70, 70, 70));
 			draw_text_kr(g_pFontKor, 70, y_arr[i] + 26, line);
@@ -1873,7 +1934,7 @@ void massage_draw(void){
 		// 2단계: 포커싱 카드 마지막에 (노란 큰 박스, z-top) — 전체 폭 확장
 		if(closest >= 0) {
 			int y = y_arr[closest] - 10;	// 큰 박스 (100h) 작은 박스 (80h) 중앙 정렬
-			sprintf(line, "%d. %s", idx_arr[closest] + 1, get_mode_name(0x31 + idx_arr[closest]));
+			sprintf(line, "%d. %s", idx_arr[closest] + 1, get_mode_name(0x31 + massage_cmd_offset[idx_arr[closest]]));
 			draw_roundrectfill(5, y, 310, 100, 10, MAKE_COLORREF(255, 230, 80));
 			egl_font_set_color(g_pFontKor, MAKE_COLORREF(20, 25, 38));
 			draw_text_kr(g_pFontKor, 30, y + 36, line);
@@ -3158,12 +3219,8 @@ void manual_selft_test_draw(void){
 
 // ====================== 자세제어 Start ================= //
 
-// 탭 버튼 좌표
+// 탭 버튼 좌표 (X는 posture_draw에서 화면 폭 4등분으로 계산)
 #define POSTURE_TAB_Y		55
-#define POSTURE_TAB_X0		5		// 등판
-#define POSTURE_TAB_X1		80		// 다리판
-#define POSTURE_TAB_X2		155		// 등/다리
-#define POSTURE_TAB_X3		235		// 높이
 
 // 아이콘 좌표
 #define POSTURE_ICON_X		50
@@ -3226,11 +3283,17 @@ void posture_proc(void)
 		// (누르는 동안 모터 동작, 떼면 정지)
 
 		case CONFORM_KEY:
-			// 모터 전체 정지 (안전)
-			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
-			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
-			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
-			debugprintf("\n\r POSTURE: ALL STOP (incl height)");
+			if(cursor.type == POSTURE_GRAVITY){
+				// 무중력 탭: 확인 시 프리셋 명령 1회 전송 (메인보드가 등판+다리판 자동 이동)
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_GRAVITY, &tmp, 0);
+				debugprintf("\n\r POSTURE: GRAVITY preset (CONFORM)");
+			} else {
+				// 그 외 탭: 모터 전체 정지 (안전)
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
+				debugprintf("\n\r POSTURE: ALL STOP (incl height)");
+			}
 			break;
 	}
 	remocon_key.key_val = 0xFF;
@@ -3243,27 +3306,27 @@ void posture_draw(void)
 	// 배경
 	draw_surface(posture_bg_img, 0, 0);
 
-	// 탭 버튼 (선택된 탭은 _a 이미지 사용)
-	if(cursor.type == POSTURE_BACK)
-		draw_surface(posture_back_plate_a_img, POSTURE_TAB_X0, POSTURE_TAB_Y);
-	else
-		draw_surface(posture_back_plate_img, POSTURE_TAB_X0, POSTURE_TAB_Y);
-
-	if(cursor.type == POSTURE_LEG)
-		draw_surface(posture_leg_plate_a_img, POSTURE_TAB_X1, POSTURE_TAB_Y);
-	else
-		draw_surface(posture_leg_plate_img, POSTURE_TAB_X1, POSTURE_TAB_Y);
-
-	if(cursor.type == POSTURE_ALL)
-		draw_surface(posture_all_plate_a_img, POSTURE_TAB_X2, POSTURE_TAB_Y);
-	else
-		draw_surface(posture_all_plate_img, POSTURE_TAB_X2, POSTURE_TAB_Y);
-
-	// 높이 탭 (이미지 재활용 — 추후 전용 이미지로 교체)
-	if(cursor.type == POSTURE_HEIGHT)
-		draw_surface(posture_all_plate_a_img, POSTURE_TAB_X3, POSTURE_TAB_Y);
-	else
-		draw_surface(posture_all_plate_img, POSTURE_TAB_X3, POSTURE_TAB_Y);
+	// 탭 버튼 — 화면 폭(320)을 4등분한 텍스트 버튼 (선택 탭 파란색 강조)
+	// 이미지 플레이트는 크기가 안 맞아 텍스트 렌더링으로 교체
+	{
+		static const char* tab_labels[POSTURE_TYPE_MAX] = {
+			"등판", "다리판", "등/다리", "무중력"
+		};
+		const int TAB_H = 44;
+		const int GAP = 4;
+		int tab_w = (320 - GAP * (POSTURE_TYPE_MAX + 1)) / POSTURE_TYPE_MAX;	// 4탭 → 75px
+		int t;
+		for(t = 0; t < POSTURE_TYPE_MAX; t++){
+			int tx = GAP + t * (tab_w + GAP);
+			int tw = kr_text_width_16(tab_labels[t]);
+			U32 bg = (cursor.type == t) ? MAKE_COLORREF(50, 120, 220)	// 선택
+			                            : MAKE_COLORREF(55, 60, 72);	// 비선택
+			draw_roundrectfill(tx, POSTURE_TAB_Y, tab_w, TAB_H, 6, bg);
+			egl_font_set_color(g_pFontKor16, MAKE_COLORREF(255, 255, 255));
+			draw_text_kr(g_pFontKor16, tx + (tab_w - tw) / 2,
+				POSTURE_TAB_Y + (TAB_H - 16) / 2, tab_labels[t]);
+		}
+	}
 
 	// 침대 아이콘 (선택된 판에 해당하는 아이콘)
 	switch(cursor.type){
@@ -3276,11 +3339,11 @@ void posture_draw(void)
 		case POSTURE_ALL:
 			draw_surface(posture_all_plate_icon_img, POSTURE_ICON_X, POSTURE_ICON_Y);
 			break;
-		case POSTURE_HEIGHT:
+		case POSTURE_GRAVITY:
 			draw_surface(posture_all_plate_icon_img, POSTURE_ICON_X, POSTURE_ICON_Y);
-			// 높이 안내 텍스트
-			egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 180, 180));
-			draw_text_kr(g_pFontKor, 110, 340, "높이 조절");
+			// 무중력 안내 텍스트 (▲ 누르면 프리셋 자세로 자동 이동)
+			egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 220, 255));
+			draw_text_kr(g_pFontKor, 83, 340, "무중력 자세");
 			break;
 	}
 
@@ -3288,9 +3351,10 @@ void posture_draw(void)
 	draw_triangle_up(POSTURE_ARROW_CX, POSTURE_ARROW_UP_Y, POSTURE_ARROW_SIZE,
 		MAKE_COLORREF(50, 120, 220));
 
-	// ▼ 아래 화살표 (파란색)
-	draw_triangle_down(POSTURE_ARROW_CX, POSTURE_ARROW_DN_Y, POSTURE_ARROW_SIZE,
-		MAKE_COLORREF(50, 120, 220));
+	// ▼ 아래 화살표 (파란색) — 무중력 탭은 프리셋 전용이라 ▲만 표시
+	if(cursor.type != POSTURE_GRAVITY)
+		draw_triangle_down(POSTURE_ARROW_CX, POSTURE_ARROW_DN_Y, POSTURE_ARROW_SIZE,
+			MAKE_COLORREF(50, 120, 220));
 
 	flip();
 }

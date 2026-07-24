@@ -56,7 +56,8 @@ enum _body_dispersion
 };
 
 #define	BODY_MASS_MAX 2
-#define MASSAGE_MAX	12
+#define MASSAGE_MAX	12		// ESP32 CMD 코드 범위 (0x31~0x3C)
+#define MASSAGE_UI_MAX	11		// 리모컨 UI에 표시할 마사지 개수 (트위스트 제외)
 extern U8 body_set_max[BODY_LEVIT_MAX];
 
 enum{
@@ -78,7 +79,7 @@ typedef struct _body
 extern U8 bar[MAX_BAR];
 extern bool body_info;
 extern U8 pressure_map[PRESSURE_ROWS][PRESSURE_COLS];
-extern S16 motor_positions[12];	// ESP32에서 받은 12 모터 위치 (0~3400)
+extern S16 motor_positions[11];	// ESP32에서 받은 11 모터 위치 (id 0~10, 0~3400)
 
 extern U32 pressure_to_color(U8 value);
 extern int motor_position_to_offset(S16 pos);
@@ -119,7 +120,7 @@ enum {
 	POSTURE_BACK = 0,	// 등판
 	POSTURE_LEG,		// 다리판
 	POSTURE_ALL,		// 등/다리
-	POSTURE_HEIGHT,		// 높이
+	POSTURE_GRAVITY,	// 무중력 (프리셋)
 	POSTURE_TYPE_MAX
 };
 
@@ -138,6 +139,9 @@ extern void draw_status_overlay(void);
 
 // 로딩 스피너 (전원 ON 직후 부팅 화면 위에 그림)
 extern void draw_loading_spinner(int cx, int cy, U32 phase);
+
+// 초기화(호밍) 화면 — 침대 그림 + 회전 스피너 + 안내 문구
+extern void homing_draw(void);
 
 // 모드 코드 → 기본 이름만 (예: "파도타기")
 extern const char* get_mode_name(U8 mode);

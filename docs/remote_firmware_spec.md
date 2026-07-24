@@ -326,9 +326,18 @@ if (prev_startup_pending == 0 && startup_pending == 1) {
 
 **확인 방법**: `CONFORM_KEY` 3초 long-press ([`drive/key.c:399`](../drive/key.c#L399)).
 - 단일 클릭 금지 — 환자/간병인의 우발적 접촉으로 침대가 움직이면 안 된다.
-- progress bar 10칸, **300ms마다 1칸** (틱 100ms 기준 3틱).
+- progress bar 10칸, **300ms마다 1칸** (`CONFORM_HOLD_TICKS = 30`, 100ms 틱).
 - 3초를 채우면 §5.2 시퀀스 실행.
 - 3초 전에 손을 떼면 progress reset, 확인창 유지.
+
+> ⚠️ **홀드 시간을 `key_read()` 호출 횟수로 재지 말 것.** `LONG_KEY_CNT(300)`를 그대로 쓰면
+> 3초가 아니라 약 11초가 된다. 메인 루프는 `key_read()` → `progress_lcd_display()` 순인데
+> ([`app/main.c:62-75`](../app/main.c#L62-L75)), 진행 바를 매 사이클 갱신하면 320×480 전체 재그리기와
+> `flip()`이 루프에 들어가 주기가 ~10ms에서 ~37ms로 늘어난다. 실측 11초.
+>
+> 홀드 시간은 **100ms 틱**(`process_target_time_handler`)에서 세고, 화면 갱신은 **진행 바 칸이
+> 바뀔 때만** 한다. `key_read()`는 키 눌림 여부(`conform_key_held`)만 보고한다.
+> 같은 이유로 전원키 롱클릭(`LONG_KEY_CNT`)도 화면 갱신이 없는 경로라서만 3초로 맞는다.
 
 **이탈 조건**:
 - 3초 확인 완료 → 홈 진행 화면 (§5.3의 기존 스피너 재사용)

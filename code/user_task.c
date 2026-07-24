@@ -64,13 +64,16 @@ U32 awaiting_homing_timeout = 0;	// 100ms 틱 단위 (50 = 5초)
 // startup_pending=1이면 확인 없이 홈을 돌리지 않는다. LCD가 꺼진 부팅 시점이 아니라
 // 사용자가 전원키를 눌러 power=true가 되는 시점에 확인창을 띄운다.
 bool startup_confirm_active = false;
-U32  conform_hold_cnt = 0;
+bool conform_key_held = false;
+U32  conform_hold_cnt = 0;		// 100ms 틱 단위 (CONFORM_HOLD_TICKS = 30 = 3초)
 
 // --- 부팅 시 GetBedStatus(0xF1) 요청 (§3) ---
 // LCD가 꺼진 상태에서도 송신한다. 3회 실패하면 브로드캐스트 대기로 fallback.
 bool boot_status_done = false;
 U8   boot_status_retry = 3;
 U32  boot_status_wait = 0;
+bool master_booted = false;	// 마스터의 첫 BedStatus를 실제로 수신했는지 (부팅 완료 판정)
+							// boot_status_done은 fallback(~600ms)으로도 켜지므로 구분 불가 → 별도 플래그
 
 // --- 통신 끊김 감지 (§7) ---
 U32  bed_status_silence = 0;
@@ -222,7 +225,9 @@ void process_target_time_handler(void){
 		{
 			bool homing_in_progress = (power &&
 				bed_status.current_mode == 0 && bed_status.run_state == 3);
-			bool spinner_shown = show_loading_screen || homing_in_progress || awaiting_homing_start;
+			// 스피너 회전은 화면 표시 조건(is_homing_active)과 일치시킨다.
+			// (마스터 부팅 대기 !master_booted 포함 — 그래야 대기 중에도 스피너가 돈다)
+			bool spinner_shown = is_homing_active();
 			if(show_loading_screen && loading_remain > 0){
 				loading_remain--;
 				if(loading_remain == 0){
@@ -265,17 +270,34 @@ void process_target_time_handler(void){
 			}
 		}
 
-		// --- 통신 끊김 감지 (spec §7) ---
-		// 브로드캐스트 주기 2초. 2주기(4.5초) 미수신이면 "연결 확인 중".
-		if(bed_status_silence < 0xFFFF) bed_status_silence++;
-		{
-			bool lost_now = (bed_status_silence >= LINK_LOST_TICKS);
-			if(lost_now != link_lost){
-				link_lost = lost_now;
+		// --- 부팅 확인창 long-press (spec §6) ---
+		// 100ms 틱 기준으로 재야 화면 재그리기 부하와 무관하게 정확히 3초가 된다.
+		// 진행 바 칸이 바뀔 때만 화면을 갱신한다. 매 틱 갱신하면 루프가 느려진다.
+		if(startup_confirm_active){
+			if(conform_key_held){
+				if(conform_hold_cnt < CONFORM_HOLD_TICKS){
+					U32 seg_before = (conform_hold_cnt * CONFORM_BAR_SEGMENTS) / CONFORM_HOLD_TICKS;
+					conform_hold_cnt++;
+					if(((conform_hold_cnt * CONFORM_BAR_SEGMENTS) / CONFORM_HOLD_TICKS) != seg_before)
+						smart_bed_display.display_refresh = true;
+					if(conform_hold_cnt >= CONFORM_HOLD_TICKS){
+						debugprintf("\n\r CONFIRM : 3s hold complete");
+						startup_confirm_accept();
+					}
+				}
+			} else if(conform_hold_cnt != 0){
+				debugprintf("\n\r CONFIRM : released early -> progress reset");
+				conform_hold_cnt = 0;
 				smart_bed_display.display_refresh = true;
-				debugprintf("\n\r [LINK] %s", link_lost ? "LOST" : "RESTORED");
 			}
 		}
+
+		// --- 통신 끊김 감지 (spec §7) --- [비활성화]
+		// ESP32 BedStatus keepalive 주기(10초)와 리모컨 timeout(4.5초) 불일치로
+		// 항상 lost 판정되는 문제 → 감지 로직 자체를 끔.
+		// 필요 시 나중에 keepalive/timeout 재조정 후 부활.
+		link_lost = false;
+		bed_status_silence = 0;
 
 		// stdby 타임아웃 카운트다운 (100ms 틱 기준 → 정확한 초 단위)
 		if(stdby_in_progress && stdby_timeout > 0){
@@ -745,15 +767,9 @@ void home_draw(void){
 	if(!power) {
 		// 전원 OFF
 		draw_surface(home_img, 0, 0);
-	} else if(show_loading_screen || awaiting_homing_start ||
-			(bed_status.current_mode == 0x00 && bed_status.run_state == 3)) {
-		// 로딩 화면 + 스피너 — 다음 중 하나일 때:
-		//   1) 초기 3초 부팅 로딩
-		//   2) CMD2_PWR_ON 후 ESP32 state=3 도착 대기
-		//   3) ESP32 호밍 진행 중
-		draw_surface(home_img, 0, 0);
-		draw_loading_spinner(160, 240, loading_anim_phase);
 	} else {
+		// 로딩/호밍 스피너 화면은 progress_lcd_display의 전역 오버레이(homing_draw)가 처리한다.
+		// 여기(홈)에 도달하면 항상 대기/상태 화면이다.
 		// PDF 슬라이드 4 — 단색 배경 + 4영역 오버레이
 		draw_rectfill(0, 0, 320, 480, MAKE_COLORREF(20, 25, 38));
 		draw_status_overlay();
@@ -868,6 +884,28 @@ void remocon_power_ctrl(U8 remo_pwr)
 	}
 }
 
+// 메인 전원 인가 시 리모컨 자동 ON — 전원키 없이 부팅과 함께 켜진다.
+// 침대+스피너(초기화) 화면을 즉시 띄우고, 이후 마스터의 BedStatus 브로드캐스트에 따라
+// protocol.c가 확인창(startup_pending=1) 또는 홈(idle)으로 전환한다.
+// CMD2_PWR_ON은 보내지 않는다 — 마스터가 startup_pending 브로드캐스트로 부팅 흐름을 주도하고,
+// 사용자 확인 후 CMD2_STDBY로 홈 시퀀스를 시작한다 (spec §5).
+void remocon_boot_power_on(void)
+{
+	power = true;
+	remo_pwr_st = REMO_LCD_ON;
+	stdby_in_progress = false;
+	power_off_pending = false;
+	awaiting_homing_start = false;
+
+	// 스피너는 마스터 부팅 완료(첫 BedStatus 수신)까지 유지된다 — is_homing_active()의 !master_booted 조건.
+	// 부팅 완료 시 startup_pending=1이면 protocol.c가 확인창으로, idle이면 홈으로 전환한다.
+	smart_bed_status.status = MODE_HOME;
+	smart_bed_display.status = MODE_HOME;
+	smart_bed_display.display_refresh = true;
+	LCD_ON();
+	debugprintf("\n\r [BOOT] auto power-on -> spinner (wait master boot)");
+}
+
 // 부팅 확인창에서 3초 확인이 끝났을 때 (spec §5.2)
 // stdby_timeout과 stdby_in_progress를 반드시 함께 세팅한다.
 // stdby_timeout 전역 초기값이 0이라 in_progress만 켜면 다음 틱에 즉시 타임아웃 처리된다.
@@ -877,6 +915,7 @@ void startup_confirm_accept(void)
 
 	startup_confirm_active = false;
 	conform_hold_cnt = 0;
+	conform_key_held = false;
 
 	stdby_timeout = STDBY_TIMEOUT_TICKS;
 	stdby_in_progress = true;
@@ -1002,6 +1041,18 @@ void process_analy_data(){
 	}
 }
 
+// 초기화(호밍) 화면 표시 조건 — 부팅 로딩 / 전원 ON 후 state=3 대기 / 호밍 진행 중.
+// 이 동안엔 홈뿐 아니라 모든 화면 위에 스피너 화면을 띄우고 키 입력을 차단한다.
+// 초기화가 끝나면(false) 정상적으로 다른 화면으로 전환된다.
+bool is_homing_active(void)
+{
+	return power && (
+		!master_booted ||					// 마스터 부팅 완료(첫 BedStatus) 전까지 스피너 유지
+		show_loading_screen ||				// 수동 전원 ON 초기 로딩
+		awaiting_homing_start ||			// 전원 ON 후 state=3 도착 대기
+		(bed_status.current_mode == 0x00 && bed_status.run_state == 3));	// 홈 시퀀스 진행
+}
+
 void progress_lcd_display(void){
 	// 통신 끊김 오버레이 (spec §7). 낙상 경고와 확인창이 우선.
 	// 원래 모드를 잃지 않도록 smart_bed_display.status를 건드리지 않는다.
@@ -1021,6 +1072,15 @@ void progress_lcd_display(void){
 	}
 
 	if(smart_bed_display.display_refresh == true){
+		// 초기화(호밍) 중: 현재 어떤 모드 화면이든 침대+스피너 화면을 오버레이한다.
+		// 낙상 경고·부팅 확인창은 안전상 우선하므로 제외한다.
+		if(is_homing_active() &&
+		   smart_bed_status.status != MODE_FALL_ALERT &&
+		   smart_bed_status.status != MODE_STARTUP_CONFIRM){
+			homing_draw();
+			smart_bed_display.display_refresh = false;
+			return;
+		}
 		switch(smart_bed_display.status){
 			case MODE_HOME: // home
 				home_draw();

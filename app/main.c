@@ -59,6 +59,11 @@ U16 k;
 	ventilation_value_power_init();
 	esp32_get_info_init();
 	sys_timer_set();
+
+	// 메인 전원 인가와 동시에 리모컨 자동 ON — 전원키 없이 침대+스피너 화면부터 시작.
+	// 이후 마스터 BedStatus에 따라 확인창/홈으로 전환된다 (protocol.c).
+	remocon_boot_power_on();
+
 	while(1){
 		// Timer event handler
 		process_target_time_handler();

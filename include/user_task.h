@@ -151,6 +151,7 @@ extern void load_font(void);
 extern void progress_lcd_display(void);
 extern void save_screenshot(void);
 extern void remocon_power_ctrl(U8 remo_pwr);
+extern void remocon_boot_power_on(void);	// 메인 전원과 함께 리모컨 자동 ON
 extern void check_stdby_progress(void);
 
 extern bool stdby_in_progress;	// 초기위치 복귀 중 (키 차단)
@@ -158,14 +159,27 @@ extern bool power_off_pending;	// ACK 후 전원 OFF 필요
 extern bool stdby_complete;		// ESP32 ACK 수신 플래그
 extern U32 stdby_timeout;		// 타임아웃 카운터
 
+// 초기화(호밍) 화면 관련
+extern U32 loading_anim_phase;		// 스피너 회전 위상 (0~7)
+extern bool show_loading_screen;	// 부팅 초기 로딩
+extern bool awaiting_homing_start;	// 전원 ON 후 ESP32 state=3 도착 대기
+extern bool master_booted;			// 마스터 첫 BedStatus 수신 여부 (부팅 스피너 유지 조건)
+extern bool is_homing_active(void);	// 초기화 화면 표시 + 키 차단 조건
+
 // 홈 타임아웃 (100ms 틱). Master watchdog 90s + 브로드캐스트 2s + 마진 20s.
 // 90s(900)로 잡으면 Master 복구 브로드캐스트 도착 전에 발화하여 경합함.
 #define STDBY_TIMEOUT_TICKS		1100
 
 // --- 부팅 확인창 (docs/remote_firmware_spec.md §5) ---
 extern bool startup_confirm_active;	// 확인창 표시 중 (키 차단)
-extern U32  conform_hold_cnt;		// CONFORM 키 홀드 카운터 (LONG_KEY_CNT=300 → ~3초)
+extern bool conform_key_held;		// key_read()가 매 루프 갱신. 시간 계산은 100ms 틱에서.
+extern U32  conform_hold_cnt;		// 홀드 경과 (100ms 틱 단위)
 extern void startup_confirm_accept(void);	// 3초 확인 완료 → CMD2_STDBY 송신
+
+// 확인 long-press 시간. 100ms 틱 기준이므로 30 = 3.0초.
+// 메인 루프 반복 횟수로 재면 화면 재그리기 부하에 따라 실제 시간이 3~4배로 늘어난다.
+#define CONFORM_HOLD_TICKS		30
+#define CONFORM_BAR_SEGMENTS	10
 
 // --- 부팅 시 GetBedStatus 요청 (§3) ---
 extern bool boot_status_done;		// 요청 절차 종료 (응답 수신 or fallback)
