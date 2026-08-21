@@ -119,13 +119,17 @@ extern void shutdown_draw(void);
 enum {
 	POSTURE_BACK = 0,	// 등판
 	POSTURE_LEG,		// 다리판
-	POSTURE_ALL,		// 등/다리
-	POSTURE_GRAVITY,	// 무중력 (프리셋)
+	POSTURE_ALL,		// 등·다리
+	POSTURE_HEIGHT,		// 높이 (침대 전체 높이 조절)
 	POSTURE_TYPE_MAX
 };
 
 extern void posture_proc(void);
 extern void posture_draw(void);
+
+// 욕창케어 (체압분산 + 교대부양 통합)
+extern void ulcer_care_proc(void);
+extern void ulcer_care_draw(void);
 
 // 낙상 경고 화면
 extern void fall_alert_draw(void);

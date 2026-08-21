@@ -1038,6 +1038,9 @@ void process_analy_data(){
 		case MODE_POSTURE:
 			posture_proc();
 			break;
+		case MODE_ULCER_CARE:
+			ulcer_care_proc();
+			break;
 	}
 }
 
@@ -1108,6 +1111,9 @@ void progress_lcd_display(void){
 				break;
 			case MODE_POSTURE:
 				posture_draw();
+				break;
+			case MODE_ULCER_CARE:
+				ulcer_care_draw();
 				break;
 			case MODE_SHUTDOWN:
 				shutdown_draw();

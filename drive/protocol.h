@@ -79,6 +79,7 @@
 #define CMD2_HEIGHT_DOWN		0x55	// 높이 내림
 #define CMD2_HEIGHT_STOP		0x56	// 높이 정지
 #define CMD2_GRAVITY			0x4D	// 무중력 자세 프리셋 (메인보드가 등판+다리판 자동 이동)
+#define CMD2_FLAT				0x4C	// 수평(플랫) 복귀 프리셋 (등판+다리판 수평으로)
 
 // 낙상 경고 (메인보드 → 리모컨)
 #define CMD2_FALL_ALERT		0xA0	// 낙상 경고 발생

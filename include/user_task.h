@@ -14,6 +14,7 @@ typedef enum{
 	MODE_SHUTDOWN,				// 종료 화면
 	MODE_FALL_ALERT,			// 낙상 경고 화면
 	MODE_STARTUP_CONFIRM,		// 부팅 확인창 (startup_pending=1)
+	MODE_ULCER_CARE,			// 욕창케어 (체압분산 + 교대부양 통합)
 	MODE_MAX
 }_status;
 

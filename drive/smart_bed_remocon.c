@@ -1780,7 +1780,7 @@ void massage_proc(void){
 	}
 	
 	switch(remocon_key.key_val){
-		case MASSA_KEY:
+		case LEVITATE_KEY:	// 마사지 버튼(LEVITATE_KEY 물리위치) 재입력 → 홈
 			smart_bed_status.status = MODE_HOME;
 			remocon_key.key_val = 0xFF;
 			break;
@@ -2080,7 +2080,7 @@ void patient_care_proc(void)
 	}
 
 	switch(remocon_key.key_val){
-		case CARE_KEY:
+		case MASSA_KEY:	// 돌봄케어 버튼(MASSA_KEY 물리위치) 재입력 → 홈
 			// 케어 모드 종료 → 홈으로
 			if(running_flag){
 				U8 tmp = 0;
@@ -3250,6 +3250,26 @@ static void draw_triangle_down(int cx, int cy, int size, U32 color)
 	}
 }
 
+// 높이조절 아이콘 — 침대(매트리스+사람) 밑에 평평한 프레임. ▲▼로 침대 전체 높이 up/down.
+static void draw_height_bed_icon(void)
+{
+	U32 FRAME = MAKE_COLORREF(200, 200, 210);	// 침대 프레임(회색)
+	U32 MAT   = MAKE_COLORREF(210, 180, 120);	// 매트리스(베이지)
+	U32 BODY  = MAKE_COLORREF(240, 240, 240);	// 사람(흰색)
+
+	// 사람 (누운 실루엣): 머리(원) + 몸통
+	draw_roundrectfill(92, 244, 24, 24, 12, BODY);		// 머리
+	draw_roundrectfill(112, 250, 118, 18, 9, BODY);		// 몸통
+
+	// 매트리스 (사람 아래)
+	draw_roundrectfill(70, 270, 180, 24, 6, MAT);
+
+	// 평평한 침대 프레임 (매트리스 아래, 다리 포함)
+	draw_roundrectfill(64, 298, 192, 8, 3, FRAME);		// 상단 레일
+	draw_rectfill(74, 306, 8, 20, FRAME);				// 좌측 다리
+	draw_rectfill(238, 306, 8, 20, FRAME);				// 우측 다리
+}
+
 void posture_proc(void)
 {
 	if(smart_bed_display.status != MODE_POSTURE){
@@ -3283,17 +3303,11 @@ void posture_proc(void)
 		// (누르는 동안 모터 동작, 떼면 정지)
 
 		case CONFORM_KEY:
-			if(cursor.type == POSTURE_GRAVITY){
-				// 무중력 탭: 확인 시 프리셋 명령 1회 전송 (메인보드가 등판+다리판 자동 이동)
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_GRAVITY, &tmp, 0);
-				debugprintf("\n\r POSTURE: GRAVITY preset (CONFORM)");
-			} else {
-				// 그 외 탭: 모터 전체 정지 (안전)
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
-				debugprintf("\n\r POSTURE: ALL STOP (incl height)");
-			}
+			// 모터 전체 정지 (안전)
+			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
+			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
+			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
+			debugprintf("\n\r POSTURE: ALL STOP (incl height)");
 			break;
 	}
 	remocon_key.key_val = 0xFF;
@@ -3310,7 +3324,7 @@ void posture_draw(void)
 	// 이미지 플레이트는 크기가 안 맞아 텍스트 렌더링으로 교체
 	{
 		static const char* tab_labels[POSTURE_TYPE_MAX] = {
-			"등판", "다리판", "등/다리", "무중력"
+			"등", "다리", "등다리", "높이"
 		};
 		const int TAB_H = 44;
 		const int GAP = 4;
@@ -3339,11 +3353,11 @@ void posture_draw(void)
 		case POSTURE_ALL:
 			draw_surface(posture_all_plate_icon_img, POSTURE_ICON_X, POSTURE_ICON_Y);
 			break;
-		case POSTURE_GRAVITY:
-			draw_surface(posture_all_plate_icon_img, POSTURE_ICON_X, POSTURE_ICON_Y);
-			// 무중력 안내 텍스트 (▲ 누르면 프리셋 자세로 자동 이동)
-			egl_font_set_color(g_pFontKor, MAKE_COLORREF(180, 220, 255));
-			draw_text_kr(g_pFontKor, 83, 340, "무중력 자세");
+		case POSTURE_HEIGHT:
+			// 높이 조절: 침대(매트리스+사람) 밑에 평평한 프레임 — ▲▼로 전체 높이 up/down
+			draw_height_bed_icon();
+			egl_font_set_color(g_pFontKor16, MAKE_COLORREF(180, 220, 255));
+			draw_text_kr(g_pFontKor16, 124, 388, "높이 조절");
 			break;
 	}
 
@@ -3351,13 +3365,111 @@ void posture_draw(void)
 	draw_triangle_up(POSTURE_ARROW_CX, POSTURE_ARROW_UP_Y, POSTURE_ARROW_SIZE,
 		MAKE_COLORREF(50, 120, 220));
 
-	// ▼ 아래 화살표 (파란색) — 무중력 탭은 프리셋 전용이라 ▲만 표시
-	if(cursor.type != POSTURE_GRAVITY)
-		draw_triangle_down(POSTURE_ARROW_CX, POSTURE_ARROW_DN_Y, POSTURE_ARROW_SIZE,
-			MAKE_COLORREF(50, 120, 220));
+	// ▼ 아래 화살표 (파란색)
+	draw_triangle_down(POSTURE_ARROW_CX, POSTURE_ARROW_DN_Y, POSTURE_ARROW_SIZE,
+		MAKE_COLORREF(50, 120, 220));
 
 	flip();
 }
 
 // ====================== 자세제어 End ================= //
+
+
+// ====================== 욕창케어 (체압분산 + 교대부양 통합) Start ============= //
+// 커서 항목: 0=체압분산, 1=교대부양 일반, 2=집중, 3=수면
+enum { ULCER_DISP = 0, ULCER_LV_NORMAL, ULCER_LV_FOCUS, ULCER_LV_SLEEP, ULCER_TYPE_MAX };
+
+void ulcer_care_proc(void)
+{
+	if(smart_bed_display.status != MODE_ULCER_CARE){
+		smart_bed_display.status = MODE_ULCER_CARE;
+		smart_bed_display.display_refresh = true;
+		memset(&cursor, 0, sizeof(CURSOR));	// cursor.mode=CURSOR_MODE, type=0(체압분산)
+		cursor.type_max = ULCER_TYPE_MAX;
+		conform_key_run = 0;
+		remocon_key.key_val = 0xFF;
+		return;
+	}
+
+	switch(remocon_key.key_val){
+		case VAIRANCE_KEY:	// 욕창케어 버튼 재입력 → 홈
+			smart_bed_status.status = MODE_HOME;
+			break;
+		case UP_KEY:		// 교대부양 → 체압분산
+			cursor.type = ULCER_DISP;
+			smart_bed_display.display_refresh = true;
+			break;
+		case DOWN_KEY:		// 체압분산 → 교대부양(일반)
+			if(cursor.type == ULCER_DISP)
+				cursor.type = ULCER_LV_NORMAL;
+			smart_bed_display.display_refresh = true;
+			break;
+		case LEFT_KEY:		// 교대부양 3개 좌 순환
+			if(cursor.type >= ULCER_LV_NORMAL)
+				cursor.type = (cursor.type > ULCER_LV_NORMAL) ? cursor.type - 1 : ULCER_LV_SLEEP;
+			smart_bed_display.display_refresh = true;
+			break;
+		case RIGHT_KEY:		// 교대부양 3개 우 순환
+			if(cursor.type >= ULCER_LV_NORMAL)
+				cursor.type = (cursor.type < ULCER_LV_SLEEP) ? cursor.type + 1 : ULCER_LV_NORMAL;
+			smart_bed_display.display_refresh = true;
+			break;
+		case CONFORM_KEY:	// 선택 항목 시작 (기존 conform_key_proc 재사용)
+			if(cursor.type == ULCER_DISP)			conform_key_proc(CMD2_DISPERSION);
+			else if(cursor.type == ULCER_LV_NORMAL)	conform_key_proc(CMD2_VENTIL_NORMAL);
+			else if(cursor.type == ULCER_LV_FOCUS)	conform_key_proc(CMD2_VENTIL_FOCUR);
+			else if(cursor.type == ULCER_LV_SLEEP)	conform_key_proc(CMD2_VENTIL_SLEEP);
+			break;
+	}
+	remocon_key.key_val = 0xFF;
+}
+
+void ulcer_care_draw(void)
+{
+	static const char* lv_name[3] = {"일반", "집중", "수면"};
+	static const char* lv_time[3] = {"(5분)", "(3분)", "(60분)"};
+	U32 SEL    = MAKE_COLORREF(210, 180, 120);	// 선택(밝은 베이지)
+	U32 UNSEL  = MAKE_COLORREF(90, 85, 70);		// 비선택
+	U32 BORDER = MAKE_COLORREF(255, 255, 255);
+	bool sel;
+	int i;
+
+	set_draw_target(getbackframe());
+	draw_rectfill(0, 0, 320, 480, MAKE_COLORREF(20, 25, 38));
+
+	// 타이틀 바
+	draw_rectfill(0, 55, 320, 44, MAKE_COLORREF(55, 60, 72));
+	egl_font_set_color(g_pFontKor, MAKE_COLORREF(255, 255, 255));
+	draw_text_kr(g_pFontKor, 104, 62, "욕창케어");
+
+	// 체압분산 큰 버튼
+	sel = (cursor.type == ULCER_DISP);
+	draw_roundrectfill(20, 118, 280, 135, 12, sel ? SEL : UNSEL);
+	if(sel) draw_roundrect(20, 118, 280, 135, 12, BORDER);
+	egl_font_set_color(g_pFontKor, sel ? MAKE_COLORREF(30, 30, 30) : MAKE_COLORREF(225, 225, 225));
+	draw_text_kr(g_pFontKor, 104, 172, "체압분산");
+
+	// 교대부양 라벨
+	egl_font_set_color(g_pFontKor16, MAKE_COLORREF(200, 200, 200));
+	draw_text_kr(g_pFontKor16, 128, 278, "교대부양");
+
+	// 교대부양 3버튼 (일반/집중/수면)
+	for(i = 0; i < 3; i++){
+		int bx = 20 + i * 96;
+		sel = (cursor.type == (U8)(ULCER_LV_NORMAL + i));
+		draw_roundrectfill(bx, 305, 88, 135, 10, sel ? SEL : UNSEL);
+		if(sel) draw_roundrect(bx, 305, 88, 135, 10, BORDER);
+		egl_font_set_color(g_pFontKor, sel ? MAKE_COLORREF(30, 30, 30) : MAKE_COLORREF(225, 225, 225));
+		draw_text_kr(g_pFontKor, bx + 16, 350, lv_name[i]);
+		egl_font_set_color(g_pFontKor16, sel ? MAKE_COLORREF(60, 60, 60) : MAKE_COLORREF(150, 150, 150));
+		draw_text_kr(g_pFontKor16, bx + 20, 392, lv_time[i]);
+	}
+
+	// 푸터
+	egl_font_set_color(g_pFontKor16, MAKE_COLORREF(200, 200, 200));
+	draw_text_kr(g_pFontKor16, 66, 458, "확인:시작   욕창케어:홈");
+
+	flip();
+}
+// ====================== 욕창케어 End ============= //
 
