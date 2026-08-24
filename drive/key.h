@@ -2,7 +2,7 @@
 
 #define INIT_KEY		(1<<12) // 초기화
 #define SET_KEY		(1<<11)	// 설정 저장
-#define VENTIL_KEY (1<<14)	// 통풍
+#define VOLUME_KEY (1<<14)	// 음량
 #define HEAT_KEY	(1<<13)	// 온열
 #define RIGHT_KEY	(1<<10)	// right
 #define LEFT_KEY		(1<<9)

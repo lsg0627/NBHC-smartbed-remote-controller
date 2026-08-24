@@ -56,7 +56,7 @@ U16 k;
 	massage_value_power_init();
 	patient_care_value_power_init();
 	heat_value_power_init();
-	ventilation_value_power_init();
+	volume_value_power_init();
 	esp32_get_info_init();
 	sys_timer_set();
 

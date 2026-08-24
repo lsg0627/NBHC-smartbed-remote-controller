@@ -34,6 +34,9 @@ U32 auto_home_timer = 0;
 // 100ms 틱 단위 (30 = 3초)
 U32 bed_state_lock_remain = 0;
 
+// 볼륨 잠금 — 음량 조절 직후 ESP32 상태 패킷이 LED/카운터를 되돌리지 못하게 함 (100ms 틱)
+U32 vol_lock_remain = 0;
+
 // stdby 시작 시점의 mode 기억 — "종료중" vs "초기화 중" 일관성 유지
 // stdby_initial_mode != 0 → "종료중" (모드 종료 중)
 // stdby_initial_mode == 0 → "초기화 중" (idle 상태에서 전원 누름)
@@ -48,6 +51,12 @@ U32 external_stopping_min_remain = 0;	// 최소 표시 시간 (clear 방지)
 // 모드 시작 ACK 직후 → state=3 transient를 stopping으로 잘못 감지하는 것 방지
 bool pending_mode_start = false;
 U32 pending_mode_start_timeout = 0;	// 100ms 틱 단위
+
+// 모드 전환 시 ESP32 홈(init) 진행 중 표시 — 경과시간 정지 + "초기화 중" 텍스트용.
+// CONFORM 시점 세팅, ESP32의 2번째 state=1 수신 시 클리어. 안전 timeout 60초.
+bool init_home_pending = false;
+U32 init_home_pending_timeout = 0;	// 100ms 틱 단위 (600 = 60초)
+U8 init_home_state1_count = 0;		// 이번 사이클의 state=1 packet 개수 (2번째에 clear)
 
 // 리모컨 전원 ON 직후 → 첫 BED_STATUS로 침대 상태 확인 후 CMD2_PWR_ON 송신 여부 결정
 // idle(state=0)이면 CMD2_PWR_ON 송신 (ESP32에서 1.mp3 + 홈 복귀 루틴 수행)
@@ -117,9 +126,17 @@ bool mode_text_last_stdby = false;	// stdby_in_progress 변경 감지용
 bool mode_text_last_external_stopping = false;	// external_stopping 변경 감지용
 bool mode_text_scrolling = false;	// 스크롤 필요 여부
 
-// 모드명 텍스트 폭 추정 (g_pFontKor: 한글=28px, ASCII=14px)
+// 모드명 텍스트 폭 계산.
+// - Pretendard bmpfont: EGL API로 실제 폰트 metric (프로포셔널 대응)
+// - SDK bitfont: UTF-8 못 다루므로 기존 고정폭 계산 유지 (한글=28, ASCII=14)
 U32 estimate_text_width_28(const char* utf8_str)
 {
+	if(!utf8_str) return 0;
+#if USE_PRETENDARD_FONT
+	if(!g_pFontKor) return 0;
+	int w = text_width(g_pFontKor, utf8_str);
+	return (w < 0) ? 0 : (U32)w;
+#else
 	U32 width = 0;
 	int i = 0;
 	while(utf8_str[i]) {
@@ -130,6 +147,7 @@ U32 estimate_text_width_28(const char* utf8_str)
 		else                    { i += 1; }
 	}
 	return width;
+#endif
 }
 //VAIRANCE_ST vairance;
 //VAIRANCE_ST vairance_temp;
@@ -309,6 +327,11 @@ void process_target_time_handler(void){
 			bed_state_lock_remain--;
 		}
 
+		// 볼륨 잠금 카운트다운 (100ms 틱)
+		if(vol_lock_remain > 0){
+			vol_lock_remain--;
+		}
+
 		// 외부 종료중 — 최소 표시 시간 decay
 		if(external_stopping && external_stopping_min_remain > 0){
 			external_stopping_min_remain--;
@@ -339,6 +362,15 @@ void process_target_time_handler(void){
 			}
 		}
 
+		// init_home_pending 안전 timeout (60초). 정상 흐름은 BED_STATUS(state=1) 수신 시 클리어.
+		if(init_home_pending && init_home_pending_timeout > 0){
+			init_home_pending_timeout--;
+			if(init_home_pending_timeout == 0){
+				init_home_pending = false;
+				smart_bed_display.display_refresh = true;
+			}
+		}
+
 		// pending_pwr_on_check: REMO_PWR_ON에서 즉시 결정하도록 변경됨 (fallback 불필요)
 
 		// VAIRANCE/LEVITATE 모드 경과 시간 타이머
@@ -352,9 +384,12 @@ void process_target_time_handler(void){
 			U8 m = bed_status.current_mode;
 			U8 s = bed_status.run_state;
 			bool is_vair_or_levit = (m == 0x20 || m == 0x10 || m == 0x11 || m == 0x12);
-			if(is_vair_or_levit && s == 1 && !stdby_in_progress) {
+			// init_home_pending 활성 중엔 카운트 정지 (ESP32가 실제 홈 시퀀스 진행 중)
+			if(is_vair_or_levit && s == 1 && !stdby_in_progress && !init_home_pending) {
 				U32 prev_sec, new_sec;
-				bool fresh_start = (prev_state_for_etimer != 1) ||
+				// fresh_start: state 0/3(정지/초기화)에서 1로 전환 or 모드 변경 시에만 true.
+				// state 2(일시정지)에서 1로 전환(resume)은 fresh_start 아님 → 이어서 카운트.
+				bool fresh_start = (prev_state_for_etimer != 1 && prev_state_for_etimer != 2) ||
 					(prev_mode_for_etimer != m);
 				if(fresh_start || mode_timer_mode != m) {
 					mode_timer_mode = m;
@@ -404,10 +439,13 @@ void process_target_time_handler(void){
 
 		// 5초 무입력 자동 홈 복귀 — 동작 중 모드가 있을 때 비-홈 화면이면 카운트다운
 		// 종료 / 낙상경고 화면은 제외 (사용자 응답 필요)
+		// 돌봄(환자케어) 화면은 제외 — 조그로 수동 조절하는 동안 미조작이 정상이므로
+		//   자동 홈 복귀하면 안 됨. 종료는 사용자가 명시적으로 홈 버튼을 눌러야 함.
 		if(power && !show_loading_screen &&
 		   smart_bed_status.status != MODE_HOME &&
 		   smart_bed_status.status != MODE_SHUTDOWN &&
 		   smart_bed_status.status != MODE_FALL_ALERT &&
+		   smart_bed_status.status != MODE_PATIENT_CARE &&
 		   (bed_status.run_state == 1 || bed_status.run_state == 2)) {
 			if(auto_home_timer > 0) {
 				auto_home_timer--;
@@ -557,12 +595,6 @@ SURFACE *heat_mian_icon_img;
 SURFACE *heat_on_img;
 SURFACE *heat_off_img;
 
-// 통풍
-SURFACE *ventil_titile_img ;
-SURFACE *ventil_mian_icon_img;
-SURFACE *ventil_on_img;
-SURFACE *ventil_off_img;
-
 SURFACE *left_arrow_img;
 SURFACE *right_arrow_img;
 SURFACE *left_run_arrow_img;
@@ -661,13 +693,8 @@ void image_load(void){
 	heat_titile_img = loadsurf("image/rc_title_bar_heat.suf");	
 	heat_mian_icon_img = loadsurf("image/main_icon_heat.suf");	
 	heat_on_img = loadsurf("image/hit_on.suf");	
-	heat_off_img = loadsurf("image/hit_off.suf");	
-	
-	ventil_titile_img = loadsurf("image/rc_title_bar_ventilat.suf");	
-	ventil_mian_icon_img = loadsurf("image/main_icon_ventilat.suf");	
-	ventil_on_img = loadsurf("image/wind_on.suf");	
-	ventil_off_img = loadsurf("image/wind_off.suf");	
-	
+	heat_off_img = loadsurf("image/hit_off.suf");
+
 	left_arrow_img = loadsurf("image/btn_left.suf");
 	right_arrow_img = loadsurf("image/btn_right.suf");
 	left_run_arrow_img = loadsurf("image/btn_left_run.suf");
@@ -691,14 +718,37 @@ void image_load(void){
 	posture_height_a_img = loadsurf("image/height_a.suf");
 }
 
+// USE_PRETENDARD_FONT는 user_task.h에서 정의 (draw_text_kr에서도 참조)
 void load_font(void){
-	g_pFont28 = create_bmpfont("image/font/font28.fnt");// font load
-	bmpfont_setautokerning(g_pFont28, true);// false : 문자간격 고정, true: 문자비율에 맞게 표시
+#if USE_PRETENDARD_FONT
+	// Pretendard .fnt는 EGLDesigner 대신 gen_pretendard_fnt.py로 생성.
+	// 한 파일에 한글/영문 모두 포함되므로 g_pFont/g_pFontKor 양쪽에서 같은 파일 참조.
+	// UTF-8 encoding 설정 → draw_text_kr에서 UTF-8 그대로 넘길 수 있음.
+	g_pFont28 = create_bmpfont("image/font/pretendard28.fnt");
+	bmpfont_setautokerning(g_pFont28, true);
+	bmpfont_settextencoding(g_pFont28, UTF8);
 
-	g_pFont16 = create_bmpfont("image/font/font16.fnt");// font load
-	bmpfont_setautokerning(g_pFont16, true);// false : 문자간격 고정, true: 문자비율에 맞게 표시
+	g_pFont16 = create_bmpfont("image/font/pretendard16.fnt");
+	bmpfont_setautokerning(g_pFont16, true);
+	bmpfont_settextencoding(g_pFont16, UTF8);
 
-	g_pFont40 = create_bmpfont("image/font/font40.fnt");// HOME 시간 박스용 (큰 숫자)
+	// 40px는 홈 화면 큰 숫자용 (ASCII만). Pretendard 40px 아틀라스는 1MB로 부담 →
+	// 기존 ASCII-only font40.fnt 그대로 사용.
+	g_pFont40 = create_bmpfont("image/font/font40.fnt");
+	bmpfont_setautokerning(g_pFont40, true);
+
+	// 한글 포인터: 같은 .fnt를 재사용 (중복 로드 방지 위해 포인터 공유)
+	g_pFontKor   = g_pFont28;
+	g_pFontKor16 = g_pFont16;
+#else
+	// [Fallback] 기존 폰트 (Pretendard .fnt 미준비 시)
+	g_pFont28 = create_bmpfont("image/font/font28.fnt");
+	bmpfont_setautokerning(g_pFont28, true);
+
+	g_pFont16 = create_bmpfont("image/font/font16.fnt");
+	bmpfont_setautokerning(g_pFont16, true);
+
+	g_pFont40 = create_bmpfont("image/font/font40.fnt");
 	bmpfont_setautokerning(g_pFont40, true);
 
 	// 한글 폰트 (SDK 내장 bitfont)
@@ -707,6 +757,7 @@ void load_font(void){
 
 	g_pFontKor16 = create_bitfont();
 	set_bitfontsize(g_pFontKor16, 8, 16, 16, 16);	// 영문8x16, 한글16x16
+#endif
 }
 
 
@@ -944,6 +995,9 @@ void check_stdby_progress(void)
 		bed_status.current_mode = 0;
 		bed_status.run_state = 0;
 		bed_state_lock_remain = 100;	// 2초 잠금 (다음 ESP32 패킷이 정상 0이라 확신될 때까지)
+		// 돌봄 틸팅 준비 상태도 리셋 (POWER_KEY로 종료 시 UI가 다시 단일 "틸팅" 박스로)
+		running_flag = false;
+		tilt_care_ready = false;
 		smart_bed_display.display_refresh = true;	// "종료중/초기화중" → "대기중" 전환 표시
 
 		if(power_off_pending){
@@ -963,6 +1017,8 @@ void check_stdby_progress(void)
 		bed_status.current_mode = 0;
 		bed_status.run_state = 0;
 		bed_state_lock_remain = 100;
+		running_flag = false;
+		tilt_care_ready = false;
 		smart_bed_display.display_refresh = true;
 		if(power_off_pending){
 			remocon_power_ctrl(REMO_LCD_OFF);
@@ -1028,7 +1084,7 @@ void process_analy_data(){
 		case MODE_PATIENT_CARE:// 환자 케어
 			patient_care_proc();
 			break;
-		// 온열/통풍은 key.c에서 직접 처리 (화면 전환 없음)
+		// 온열/음량은 key.c에서 직접 처리 (화면 전환 없음)
 		// case MODE_SET_SAVE:
 			// set_proc();
 			// break;
@@ -1105,7 +1161,7 @@ void progress_lcd_display(void){
 			case MODE_PATIENT_CARE:
 				patient_care_draw();
 				break;
-			// 온열/통풍은 화면 없음 (LED만 제어)
+			// 온열/음량은 화면 없음 (LED만 제어)
 			case MODE_INITIAL:
 				initial_draw();
 				break;

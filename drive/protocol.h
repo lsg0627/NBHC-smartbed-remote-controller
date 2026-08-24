@@ -19,7 +19,7 @@
 #define PROD_CODE	0x53423143	//"SB1C"
 
 // COMMAND ID
-#define CMD1_SEND_RUN_ST	0x10	// 동작상태 전송 ( 교대부양, 체압분산, 마사지, 온열, 통풍, 온열, 동작상태, 전원, 초기화 )
+#define CMD1_SEND_RUN_ST	0x10	// 동작상태 전송 ( 교대부양, 체압분산, 마사지, 온열, 음량, 동작상태, 전원, 초기화 )
 #define CMD1_SEND_SET_VAL	0x20	// 설정 값 전송 ( 동작시간, RPM, 높이, 간격(동작주기), 마사지, 감도, 밸브, 자체검사 )
 #define CMD1_SEND_GET_BAR	0x30
 #define CMD1_BED_STATUS		0x40	// 침대 상태 정보 (주기적 수신)
@@ -49,12 +49,16 @@
 
 #define CMD2_MASSAGE	0x31	// massage 1
 
-#define CMD2_HEAR		0x40	// 머리감기
+#define CMD2_HEAR		0x40	// 머리감기 (돌봄 화면에서 미사용, 하위호환용)
 #define CMD2_CATHARSIS	0x41	// 배변 (사용 안 함)
-#define CMD2_MOVE_LEFT	0X42	// LEFT KEY
-#define CMD2_MOVE_RIGHT	0x43 // RIGHT KEY
-#define CMD2_MOVE_CENTER	0x44	// 틸트 원위치
+#define CMD2_MOVE_LEFT	0X42	// 좌측 바 올림 (틸팅 조그 UP, 좌 선택)
+#define CMD2_MOVE_RIGHT	0x43 // 우측 바 올림 (틸팅 조그 UP, 우 선택)
+#define CMD2_MOVE_CENTER	0x44	// 틸트 정지 (제자리)
+#define CMD2_MOVE_LEFT_DOWN		0x57	// 좌측 바 내림 (틸팅 조그 DOWN, 좌 선택)
+#define CMD2_MOVE_RIGHT_DOWN	0x58	// 우측 바 내림 (틸팅 조그 DOWN, 우 선택)
 #define CMD2_TILT_CARE	0x4E	// 틸팅 케어 (수동 좌우 틸트)
+#define CMD2_TREND		0x4F	// 트렌델렌버그 (돌봄 전용, 마사지 재사용 아님)
+#define CMD2_TILT_READY	0xF2	// (수신 전용) ESP32 tilt_care[] 완료 통지 → 리모컨 UI 좌/우 분할 활성화
 #define CMD2_MEAL		0x4B	// 식사 모드
 
 #define CMD2_HEAT	0x50	// 온열 OFF
@@ -62,7 +66,6 @@
 #define CMD2_HEAT2	0x52
 #define CMD2_HEAT3	0x53
 
-#define CMD2_VENTIL	0x60	// (미사용 — 통풍 기능 없음)
 #define CMD2_VOLUME	0xB0	// 볼륨 0 (음소거)
 #define CMD2_VOLUME1	0xB1	// 볼륨 25
 #define CMD2_VOLUME2	0xB2	// 볼륨 50
@@ -101,7 +104,6 @@
 
 // #define CMD2_RUN		0x01
 // #define CMD2_AUDIO	0x04
-// #define CMD2_VENTIL	0x05	// ventilation(통풍)
 // #define CMD2_HEAT	0x06	// 온열
 // #define CMD2_MOTOR	0x07
 // #define CMD2_LED		0x08

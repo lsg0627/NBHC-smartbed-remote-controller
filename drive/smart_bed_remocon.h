@@ -57,13 +57,13 @@ enum _body_dispersion
 
 #define	BODY_MASS_MAX 2
 #define MASSAGE_MAX	12		// ESP32 CMD 코드 범위 (0x31~0x3C)
-#define MASSAGE_UI_MAX	11		// 리모컨 UI에 표시할 마사지 개수 (트위스트 제외)
+#define MASSAGE_UI_MAX	8		// 리모컨 UI에 표시할 마사지 개수 (집중/트렌델/무중력/트위스트 삭제)
 extern U8 body_set_max[BODY_LEVIT_MAX];
 
 enum{
-	PATIENT_HEAD = 0,// 머리감기
-	PATIENT_MEAL,	// 식사
-	PATIENT_TILT,	// 틸팅
+	PATIENT_MEAL = 0,	// 식사모드 (버튼 0, 상단)
+	PATIENT_TILT,		// 틸팅 (버튼 1, 중간)
+	PATIENT_TREND,		// 트렌델렌버그 (버튼 2, 하단)
 };
 
 
@@ -89,14 +89,16 @@ extern BODY dispersion;// 체압분산
 extern BODY massage[12];	// 마사지
 extern int running_massage_type;	// 현재 동작 중인 마사지 (-1: 없음, 0~11)
 extern bool running_flag;			// 돌봄케어 동작 중 플래그
+extern bool tilt_care_ready;		// 돌봄 틸팅 준비 완료 (ESP32 tilt_care[] 종료 후 true)
+extern int  tilt_sel;				// 틸팅 방향 선택 (0=좌틸팅, 1=우틸팅) — ◀/▶로 이동, CONFORM 홀드로 실행
 extern BODY patient_care[3];
 extern BODY heag;
 extern BODY temp_body;
 extern BODY heat;
-extern BODY ventilation;
+extern BODY volume;
 
 extern void heat_led_ctrl(U8 led);
-extern void ventilation_led_ctrl(U8 led);
+extern void volume_led_ctrl(U8 led);
 
 
 
@@ -106,6 +108,7 @@ extern void levitate_value_power_init(void);
 extern void dispersion_value_power_init(void);
 extern void massage_value_power_init(void);
 extern void patient_care_value_power_init(void);
+extern void volume_value_power_init(void);
 
 extern void levitate_proc(void);
 extern void smart_bed_remocon_port_init(void);

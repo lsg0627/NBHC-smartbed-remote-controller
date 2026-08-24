@@ -25,6 +25,8 @@ static bool care_up_active = false;
 static bool care_down_active = false;
 static bool care_left_active = false;
 static bool care_right_active = false;
+static bool care_tilt_active = false;	// 틸팅 조그 활성 상태 (올림/내림 중이면 true)
+static U8   care_tilt_dir = 0;			// 틸팅 조그 방향: 0=정지, 1=올림(UP), 2=내림(DOWN)
 
 void key_init(void){
 	
@@ -262,15 +264,28 @@ void key_read(void){
 	if(startup_confirm_active && power == true &&
 	   smart_bed_status.status != MODE_FALL_ALERT){
 		conform_key_held = !(remocon_key.current & CONFORM_KEY);
-		remocon_key.run = true;
-		return;
+		// VOLUME(음량) / HEAT(온열) 키는 확인창 중에도 조작 허용 → 아래 처리 블록으로 통과.
+		// (호밍 중과 동일하게 음량/온열 조작만 예외적으로 통과시킴)
+		bool volume_pressed = !(remocon_key.current & VOLUME_KEY);
+		bool heat_pressed   = !(remocon_key.current & HEAT_KEY);
+		if(!volume_pressed && !heat_pressed){	// 둘 다 안 눌림 → 다른 키 차단
+			remocon_key.run = true;
+			return;
+		}
+		// VOLUME 또는 HEAT 눌림 → 통과 (하단 처리 로직 실행)
 	}
 
 	// 초기화(호밍) 중에는 화면 전환/조작 키를 차단한다. (전원 OFF는 위 홀드 로직에서 이미 처리됨)
 	// 초기화가 끝나면 is_homing_active()==false가 되어 정상적으로 다른 화면으로 전환된다.
+	// 단, 음량(VOLUME) / 온열(HEAT) 키는 음량/온열 전용이라 호밍 중에도 조절을 허용한다.
 	if(is_homing_active()){
-		remocon_key.run = true;
-		return;
+		bool volume_pressed = !(remocon_key.current & VOLUME_KEY);
+		bool heat_pressed   = !(remocon_key.current & HEAT_KEY);
+		if(!volume_pressed && !heat_pressed){	// 둘 다 안 눌림 → 다른 키 차단
+			remocon_key.run = true;
+			return;
+		}
+		// VOLUME 또는 HEAT 눌림 → 통과 (하단 처리 블록 실행)
 	}
 
 	// 초기위치 복귀 중에도 키 입력 허용 (위에서 자동 캔슬됨)
@@ -347,8 +362,8 @@ void key_read(void){
 		if(smart_bed_status.status == MODE_PATIENT_CARE && running_flag && power == true){
 			U8 tmp = 0;
 
-			if(cursor.type == PATIENT_HEAD || cursor.type == PATIENT_MEAL){
-				// 머리감기/식사: UP/DOWN 조그 → 바 높이/등판 각도 조절
+			if(cursor.type == PATIENT_MEAL){
+				// 식사모드: UP/DOWN 조그 → 등판 각도 조절
 				bool up_held = !(remocon_key.current & UP_KEY);
 				bool down_held = !(remocon_key.current & DOWN_KEY);
 
@@ -374,30 +389,25 @@ void key_read(void){
 				}
 			}
 
-			if(cursor.type == PATIENT_TILT){
-				// 틸팅: LEFT/RIGHT 조그 → 좌우 틸트
-				bool left_held = !(remocon_key.current & LEFT_KEY);
-				bool right_held = !(remocon_key.current & RIGHT_KEY);
+			if(cursor.type == PATIENT_TILT && tilt_care_ready){
+				// 틸팅(분할 후): ◀/▶는 방향 선택(좌/우, patient_care_proc 처리),
+				//   UP▲ 홀드 = 선택된 쪽 올림, DOWN▼ 홀드 = 선택된 쪽 내림, 떼면 정지.
+				bool up_held   = !(remocon_key.current & UP_KEY);
+				bool down_held = !(remocon_key.current & DOWN_KEY);
+				U8 want = 0;	// 0=정지, 1=올림, 2=내림
+				if(up_held)        want = 1;
+				else if(down_held) want = 2;
 
-				if(left_held && !care_left_active){
-					care_left_active = true;
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_LEFT, &tmp, 0);
-					debugprintf("\n\r CARE JOG: TILT LEFT");
-				}
-				if(!left_held && care_left_active){
-					care_left_active = false;
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_CENTER, &tmp, 0);
-					debugprintf("\n\r CARE JOG: TILT LEFT STOP");
-				}
-				if(right_held && !care_right_active){
-					care_right_active = true;
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_RIGHT, &tmp, 0);
-					debugprintf("\n\r CARE JOG: TILT RIGHT");
-				}
-				if(!right_held && care_right_active){
-					care_right_active = false;
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_CENTER, &tmp, 0);
-					debugprintf("\n\r CARE JOG: TILT RIGHT STOP");
+				if(want != care_tilt_dir){
+					U8 cmd;
+					if(want == 1)      cmd = (tilt_sel == 0) ? CMD2_MOVE_LEFT      : CMD2_MOVE_RIGHT;
+					else if(want == 2) cmd = (tilt_sel == 0) ? CMD2_MOVE_LEFT_DOWN : CMD2_MOVE_RIGHT_DOWN;
+					else               cmd = CMD2_MOVE_CENTER;	// 정지(제자리)
+					esp32_packet_send(CMD1_SEND_RUN_ST, cmd, &tmp, 0);
+					care_tilt_dir = want;
+					care_tilt_active = (want != 0);
+					debugprintf("\n\r CARE JOG: TILT %s %s", tilt_sel == 0 ? "L" : "R",
+					            want == 1 ? "UP" : (want == 2 ? "DOWN" : "STOP"));
 				}
 			}
 		} else {
@@ -409,12 +419,14 @@ void key_read(void){
 				care_down_active = false;
 				debugprintf("\n\r CARE JOG: EXIT -> UP/DOWN STOP");
 			}
-			if(care_left_active || care_right_active){
+			if(care_left_active || care_right_active || care_tilt_active){
 				U8 tmp = 0;
 				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_CENTER, &tmp, 0);
 				care_left_active = false;
 				care_right_active = false;
-				debugprintf("\n\r CARE JOG: EXIT -> LEFT/RIGHT STOP");
+				care_tilt_active = false;
+				care_tilt_dir = 0;
+				debugprintf("\n\r CARE JOG: EXIT -> TILT STOP");
 			}
 		}
 	}
@@ -514,15 +526,17 @@ void key_read(void){
 			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEAT + heat.body[0][0], &tmp, 0);
 			return;
 		}
-// 볼륨 (화면 전환 없이 LED + 설정값만 순환: 0=음소거, 1=25, 2=50, 3=100)
-		if(!(remocon_key.current & VENTIL_KEY)){
+// 음량 (화면 전환 없이 LED + 설정값만 순환: 0=음소거, 1=25, 2=50, 3=100)
+		if(!(remocon_key.current & VOLUME_KEY)){
 			U8 tmp = 0;
-			ventilation.body[0][0]++;
-			if(ventilation.body[0][0] > 3)
-				ventilation.body[0][0] = 0;
-			debugprintf("\n\r KEY : VOLUME level=%d", ventilation.body[0][0]);
-			ventilation_led_ctrl(ventilation.body[0][0]);
-			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_VOLUME + ventilation.body[0][0], &tmp, 0);
+			volume.body[0][0]++;
+			if(volume.body[0][0] > 3)
+				volume.body[0][0] = 0;
+			debugprintf("\n\r KEY : VOLUME level=%d", volume.body[0][0]);
+			volume_led_ctrl(volume.body[0][0]);
+			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_VOLUME + volume.body[0][0], &tmp, 0);
+			// 방금 조절 → 2초간 ESP 상태 패킷의 볼륨 되동기화 차단 (왕복 지연 중 되돌림 방지)
+			vol_lock_remain = 20;
 			return;
 		}
 // 설정/저장

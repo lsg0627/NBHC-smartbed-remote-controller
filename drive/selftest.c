@@ -59,22 +59,6 @@ void selftest_esp32(void)
          buff = 0;
         esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_HEAT, 1, &buff);
 
-        // FAN
-        buff = 0;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-        delayms(10000);// 10sec delay 
-        buff = 1;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-        delayms(10000);// 10sec delay 
-        buff = 2;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-        delayms(10000);// 10sec delay 
-        buff = 3;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-        delayms(10000);// 10sec delay 
-        buff = 0;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-
     }
     set_draw_target(getbackframe());// back frame select
     draw_rect(0,0, 320,480, MAKE_COLORREF(0,0,0));

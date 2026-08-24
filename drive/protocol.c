@@ -62,22 +62,6 @@ void selftest_esp32(void)
          buff = 0;
         esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_HEAT, 1, &buff);
 
-        // FAN
-        buff = 0;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-        delayms(10000);// 10sec delay 
-        buff = 1;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-        delayms(10000);// 10sec delay 
-        buff = 2;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-        delayms(10000);// 10sec delay 
-        buff = 3;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-        delayms(10000);// 10sec delay 
-        buff = 0;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-
     }
     set_draw_target(getbackframe());// back frame select
     draw_rect(0,0, 320,480, MAKE_COLORREF(0,0,0));
@@ -600,10 +584,14 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 						if(stdby_in_progress) {
 							stdby_complete = true;
 							debugprintf("\n\r ACK: STDBY COMPLETE (legitimate)");
+							// 진짜 종료(전원키/포어스 리셋)일 때만 running_massage_type 클리어.
+							// 마사지 시작 시 ESP32가 init(호밍) 후 보내는 orphan STDBY ACK에서는
+							// 클리어하면 안 됨 → 나중에 마사지 화면 재진입 시 커서 자동 선택 실패.
+							running_massage_type = -1;
 						} else {
 							debugprintf("\n\r ACK: STDBY (orphan, ignored)");
+							// 마사지 시작 시 나오는 orphan STDBY ACK — running_massage_type 유지
 						}
-						running_massage_type = -1;
 					}
 					else if(buff[ACTI_D + i] >= CMD2_MASSAGE && buff[ACTI_D + i] < (CMD2_MASSAGE + MASSAGE_MAX)){
 						// 마사지 시작 ACK — 즉시 bed_status 반영
@@ -623,7 +611,8 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 					        buff[ACTI_D + i] == CMD2_VENTIL_SLEEP ||
 					        buff[ACTI_D + i] == CMD2_HEAR ||
 					        buff[ACTI_D + i] == CMD2_MEAL ||
-					        buff[ACTI_D + i] == CMD2_TILT_CARE) {
+					        buff[ACTI_D + i] == CMD2_TILT_CARE ||
+					        buff[ACTI_D + i] == CMD2_TREND) {
 						bed_status.current_mode = buff[ACTI_D + i];
 						bed_status.run_state = 1;
 						external_stopping = false;
@@ -631,6 +620,12 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 						pending_mode_start_timeout = 150;
 						smart_bed_display.display_refresh = true;
 						debugprintf("\n\r ACK: MODE 0x%02x (pending_mode_start=on)", buff[ACTI_D + i]);
+					}
+					else if(buff[ACTI_D + i] == CMD2_TILT_READY) {
+						// ESP32 tilt_care[] routine 완료 통지 → 리모컨 UI 좌/우 조그 활성화
+						tilt_care_ready = true;
+						smart_bed_display.display_refresh = true;
+						debugprintf("\n\r ACK: TILT_READY (jog UI enabled)");
 					}
 					else if(buff[ACTI_D + i] == CMD2_PAUSE) {
 						// 일시정지 ACK
@@ -720,12 +715,31 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 						U8 prev_mode = bed_status.current_mode;
 						U8 prev_state = bed_status.run_state;
 						U8 prev_pending = prev_startup_pending;
+						U8 prev_powered = bed_status.powered_on;
+						// 통신 끊김 감지: 이 패킷 도착 직전까지 얼마나 조용했는지 (100ms 틱)
+						// > 30 (3초) 이면 ESP32가 잠시 offline이었다고 판단
+						bool esp32_was_silent = (bed_status_silence > 30);
 						memcpy(&new_status, &buff[i + LENGTH + 1], sizeof(BED_STATUS_DATA));
 
 						// GetBedStatus 응답 or 브로드캐스트 — 둘 다 여기로 온다 (spec §3)
 						boot_status_done = true;
 						master_booted = true;		// 마스터 부팅 완료 — 부팅 스피너 해제 신호
 						bed_status_silence = 0;		// 끊김 감지 리셋 (§7)
+
+						// [init_home_pending 클리어] state=1 packet 개수 카운트.
+						// ESP32는 CONFORM 직후 (mode,1) 한 번, BarsInitialized에서 (mode,1) 또 한 번.
+						// 2번째 도착 = post-homing → 클리어. 홈 시간 무관.
+						// (lock override 전 raw esp_state/esp_mode 사용 — 실제 ESP32 상태 반영)
+						if(init_home_pending && esp_state == 1 && esp_mode != 0){
+							init_home_state1_count++;
+							if(init_home_state1_count >= 2){
+								init_home_pending = false;
+								init_home_pending_timeout = 0;
+								smart_bed_display.display_refresh = true;
+								debugprintf("\n\r [INIT] home complete (state1 count=2, mode=0x%02x)", esp_mode);
+							}
+						}
+
 						// 로컬 상태 잠금 — ESP32가 로컬 상태 확인할 때까지 mode/state 보호
 						if(bed_state_lock_remain > 0){
 							if(new_status.current_mode == bed_status.current_mode &&
@@ -742,6 +756,16 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 							esp_mode, esp_state, final_mode, final_state, bed_state_lock_remain);
 						memcpy(&bed_status, &new_status, sizeof(BED_STATUS_DATA));
 
+						// ---- 볼륨(음량) 동기화 ----
+						// ESP32가 보고하는 실제 볼륨(NVS 유지값)으로 리모컨 LED/카운터를 맞춘다.
+						// 전원 재부팅/초기화 후에도 저장된 음량이 LED에 그대로 반영된다.
+						// 단, 사용자가 방금 조절 중(vol_lock_remain>0)이면 왕복 지연 중 되돌림 방지를 위해 건너뛴다.
+						if(vol_lock_remain == 0 && bed_status.volume_level <= 3 &&
+						   volume.body[0][0] != bed_status.volume_level){
+							volume.body[0][0] = bed_status.volume_level;
+							volume_led_ctrl(bed_status.volume_level);
+						}
+
 						// ================= 부팅 확인창 관련 전이 (spec §5.3 / §5.4) =================
 						// 주의: bed_state_lock_remain은 mode/state만 덮어쓰고 startup_pending은 통과시킨다.
 						//
@@ -749,11 +773,26 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 						//     watchdog 복구는 run_state 3→0 과 pending 0→1 을 같은 패킷에 실어 보낸다.
 						//     그래서 반드시 Path B보다 먼저 평가해야 한다. 순서를 바꾸면
 						//     watchdog 복구를 홈 완료로 오인하여 확인창 대신 일반 UI로 들어간다.
-						if(prev_pending == 0 && bed_status.startup_pending == 1){
-							debugprintf("\n\r [PENDING] 0->1 (master reboot or watchdog) -> confirm required");
+						// [침대 재부팅 감지] 다음 중 하나라도 성립하면 ESP32가 재부팅한 것으로 판정.
+						//   (1) startup_pending 0→1 전환 (기존 케이스 — 정상 상황)
+						//   (2) 3초 이상 통신 끊김 후 startup_pending=1 수신
+						//       (예: prev가 이미 1이었는데 ESP32가 재부팅. transition은 안 뜨지만 silence로 감지)
+						//   (3) powered_on 1→0 + startup_pending=1 (ESP32 부팅 직후 상태)
+						bool bed_rebooted =
+							(bed_status.startup_pending == 1) &&
+							((prev_pending == 0) || esp32_was_silent ||
+							 (prev_powered == 1 && bed_status.powered_on == 0));
+
+						if(bed_rebooted){
+							debugprintf("\n\r [REBOOT] master reboot detected (prev_pending=%d, silence=%d, prev_pwr=%d->%d)",
+								prev_pending, esp32_was_silent, prev_powered, bed_status.powered_on);
 							stdby_in_progress = false;
 							stdby_complete = false;
 							stdby_timeout = 0;
+							// ESP32의 heat_level/volume은 0으로 초기화됨 → 리모컨도 동기화
+							// 내부 상태 + LED 모두 리셋 (사용자가 이전 상태로 오해하지 않도록)
+							heat.body[0][0] = 0;
+							heat_led_ctrl(0);
 							if(power){
 								startup_confirm_active = true;
 								conform_hold_cnt = 0;

@@ -7,7 +7,6 @@ typedef enum{
 	MODE_MASSAGE, 		// 마사지
 	MODE_PATIENT_CARE, 				// 환자케어
 	MODE_HEAT, 		// 온열
-	MODE_VENTILATION,	// 통풍
 	MODE_SET_SAVE, 		// 설정,저장
 	MODE_INITIAL	,			// 초기화
 	MODE_POSTURE,				// 자세제어
@@ -115,10 +114,6 @@ extern SURFACE *heat_mian_icon_img;
 extern SURFACE *heat_on_img;
 extern SURFACE *heat_off_img;
 
-extern SURFACE *ventil_titile_img ;
-extern SURFACE *ventil_mian_icon_img;
-extern SURFACE *ventil_on_img;
-extern SURFACE *ventil_off_img;
 extern SURFACE *left_arrow_img;
 extern SURFACE *right_arrow_img;
 extern SURFACE *left_run_arrow_img;
@@ -204,6 +199,10 @@ extern U32 mode_text_offset;	// 현재 스크롤 오프셋 (px)
 // 로컬 상태 잠금 — 사용자 액션 후 ESP32 패킷이 current_mode/run_state를 덮어쓰지 못하게 함
 extern U32 bed_state_lock_remain;	// 100ms 틱 단위 (30 = 3초)
 
+// 볼륨 잠금 — 사용자가 방금 음량을 조절한 직후, ESP32 상태 패킷(왕복 지연 중 이전 값)이
+// 리모컨 LED/카운터를 되돌리지 못하게 함. 0이면 ESP 보고값으로 동기화 허용.
+extern U32 vol_lock_remain;	// 100ms 틱 단위 (20 = 2초)
+
 // stdby 시작 시점의 mode 기억 (텍스트 일관성용)
 extern U8 stdby_initial_mode;
 
@@ -215,6 +214,15 @@ extern U32 external_stopping_min_remain;	// 최소 표시 시간
 // 모드 시작 ACK 직후 잠시 (false-positive stopping 방지)
 extern bool pending_mode_start;
 extern U32 pending_mode_start_timeout;
+
+// 모드 전환 시 ESP32가 홈(init) 진행 중임을 추적. CONFORM 시점 → 홈 완료(2번째 state=1)까지.
+// 활성 중엔: 경과시간 카운트 정지 + HOME 화면 "초기화 중" 표시.
+// 감지 원리: ESP32는 CONFORM 처리 후 즉시 (mode,1)을 한 번 보내고(pre-homing),
+//   홈 완료 시 BarsInitialized에서 (mode,1)을 또 보냄(post-homing).
+//   state=1 패킷 count가 >= 2 되면 홈 완료로 판정 → 안정적으로 감지 (홈 시간 무관).
+extern bool init_home_pending;
+extern U32 init_home_pending_timeout;
+extern U8 init_home_state1_count;	// 이번 init 사이클 동안 관측한 state=1 packet 개수
 
 // 리모컨 전원 ON 후 첫 BED_STATUS로 침대 상태 확인 후 PWR_ON 조건부 송신
 extern bool pending_pwr_on_check;
@@ -228,4 +236,17 @@ extern const U32 massage_durations_ms[12];
 // VAIRANCE/LEVITATE 모드 경과 시간 타이머
 extern U32 mode_timer_elapsed_ms;
 extern U8  mode_timer_mode;
+
+// Pretendard 통합 폰트 사용 스위치 (한글/영문 모두 UTF-8 native).
+// 1 : NAND에 pretendard{16,28}.fnt + _0.tga 배치 후 활성화 (40px는 기존 font40 유지)
+// 0 : 기존 폰트 (font*.fnt + SDK bitfont) 사용 — 안전 기본값
+// 생성 파일:
+//   flash_image/image/font/pretendard16.fnt + pretendard16_0.tga (~70KB)
+//   flash_image/image/font/pretendard28.fnt + pretendard28_0.tga (~270KB)
+// [주의] 반드시 NAND에 .fnt+.tga 배치 후 flash 완료된 상태에서만 1로 변경할 것.
+//        파일 없이 1로 두면 create_bmpfont()가 NULL 반환 → 첫 draw에서 크래시.
+#define USE_PRETENDARD_FONT   0
+
+// text_width 계산 함수 프로토타입 (Pretendard 프로포셔널 지원)
+extern U32 estimate_text_width_28(const char* utf8_str);
 
