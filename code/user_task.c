@@ -232,10 +232,6 @@ void process_target_time_handler(void){
 	if(time_10msec_interval_get(pDC->target_time.tmout_10msec) > 10){
 		pDC->target_time.tmout_10msec = *((volatile unsigned int*)TMCNT_ADDR(SYS_TIMER_CH));// get timer count
 		//progress_10ms_condition();
-
-		// 방식 A 워치독: 조그(자세제어+돌봄케어) 홀드 중 200ms마다 명령 재전송(keepalive)
-		jog_keepalive();
-
 		if(esp32_get_infomation.get_info_time)
 			esp32_get_infomation.get_info_time--;
 

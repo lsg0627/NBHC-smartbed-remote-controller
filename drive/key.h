@@ -52,4 +52,3 @@ extern bool power ;
 
 void key_init(void);
 void key_read(void);
-void jog_keepalive(void);	// 방식 A 조그 워치독 (자세제어+돌봄케어, 100ms 틱마다 호출)
