@@ -62,22 +62,6 @@ void selftest_esp32(void)
          buff = 0;
         esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_HEAT, 1, &buff);
 
-        // FAN
-        buff = 0;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-        delayms(10000);// 10sec delay 
-        buff = 1;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-        delayms(10000);// 10sec delay 
-        buff = 2;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-        delayms(10000);// 10sec delay 
-        buff = 3;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-        delayms(10000);// 10sec delay 
-        buff = 0;
-        esp32_packet_send(CMD1_SEND_RUN_ST,CMD2_VENTIL, 1, &buff);
-
     }
     set_draw_target(getbackframe());// back frame select
     draw_rect(0,0, 320,480, MAKE_COLORREF(0,0,0));
@@ -192,6 +176,7 @@ void selftest_remocon(void)
 //
 //////////////////////////////////////////////////////////////////////////////////////////////////
 #include "../app/main.h"
+extern int ulcer_config_mode;	// 욕창 설정창 열렸을 때 텔레메트리 재그리기 억제용
 
 ESP32_COMM esp32_uart;
 ESP32_GET esp32_get_infomation;
@@ -548,44 +533,155 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 			switch(buff[CMD_ID + i])
 			{
 				case CMD1_GET_BAR_INFO:	// bar information
-					
-					memcpy(bar, &buff[i+LENGTH+1], buff[LENGTH]);
-					//esp32_uart.rx_read_pointer += buff[i+LENGTH] + LENGTH+ 3;
-					smart_bed_display.display_refresh = true;
-					for(tmp=0; tmp<buff[LENGTH]; tmp++)
-						debugprintf("->0x%x ", bar[tmp]);
-					debugprintf("\n\r r%d  w%d", esp32_uart.rx_read_pointer, esp32_uart.rx_write_pointer);
-					PRINTLINE;
+					// [디버그 출력 제거] 모터 이동 시 high-frequency 패킷 → debug print 폭주 방지
+					// 값이 실제로 바뀔 때만 재그리기 → 매 패킷 무조건 refresh로 인한 프레임-락(키 씹힘) 방지.
+					if(memcmp(bar, &buff[i+LENGTH+1], buff[LENGTH]) != 0){
+						memcpy(bar, &buff[i+LENGTH+1], buff[LENGTH]);
+						if(!ulcer_config_mode) smart_bed_display.display_refresh = true;
+					}
 					break;
-				case CMD1_GET_PRESSURE_MAP:	// pressure map (7x10) - 임시 비활성
-#if 0
-					if(buff[i+LENGTH] >= PRESSURE_MAP_SIZE)
-						memcpy(pressure_map, &buff[i+LENGTH+1], PRESSURE_MAP_SIZE);
-					debugprintf("\n\r pressure_map r%d w%d", esp32_uart.rx_read_pointer, esp32_uart.rx_write_pointer);
-					PRINTLINE;
-					smart_bed_display.display_refresh = true;
-#endif
+				case CMD1_GET_PRESSURE_MAP:	// pressure map (11x7 = 77 bytes)
+					bed_status_silence = 0;	// 연결 확인 리셋 (link_lost 방지)
+					if(buff[i+LENGTH] >= PRESSURE_MAP_SIZE) {
+						U8 *new_data = &buff[i+LENGTH+1];
+						U8 *old_data = (U8*)pressure_map;
+						int n;
+						bool changed = false;
+						for(n = 0; n < PRESSURE_MAP_SIZE; n++) {
+							int d = (int)new_data[n] - (int)old_data[n];
+							if(d < 0) d = -d;
+							if(d >= 8) { changed = true; break; }
+						}
+						memcpy(pressure_map, new_data, PRESSURE_MAP_SIZE);
+						if(changed && !ulcer_config_mode) smart_bed_display.display_refresh = true;
+					}
+					break;
+				case CMD1_GET_MOTOR_POSITION:	// 11 모터 위치 (22 bytes, int16 LE)
+					bed_status_silence = 0;	// 연결 확인 리셋
+					if(buff[i+LENGTH] >= 22) {
+						int k;
+						bool changed = false;
+						for(k = 0; k < 11; k++) {
+							U8 lo = buff[i+LENGTH+1 + k*2];
+							U8 hi = buff[i+LENGTH+1 + k*2 + 1];
+							S16 newp = (S16)(((U16)hi << 8) | lo);
+							S16 diff = newp - motor_positions[k];
+							if(diff < 0) diff = -diff;
+							if(diff >= 5) {
+								motor_positions[k] = newp;
+								changed = true;
+							} else if(newp != motor_positions[k]) {
+								motor_positions[k] = newp;
+							}
+						}
+						if(changed && !ulcer_config_mode) smart_bed_display.display_refresh = true;
+					}
 					break;
 				case CMD1_GET_BODY_INFO:	// body information
 					if(buff[i+LENGTH+1] == 0x30)
 						body_info = true;
 					else body_info = false;
-					//esp32_uart.rx_read_pointer += buff[i+LENGTH] + LENGTH+ 3;
-					for(tmp=0; tmp<buff[LENGTH]; tmp++)
-						debugprintf("->0x%x ", bar[tmp]);
-					debugprintf("\n\r r%d  w%d", esp32_uart.rx_read_pointer, esp32_uart.rx_write_pointer);
-					PRINTLINE;
 					smart_bed_display.display_refresh = true;
 					break;
 				case CMD1_SEND_RUN_ST:	// 동작상태 에코 ACK
 					if(buff[ACTI_D + i] == CMD2_STDBY){
-						stdby_complete = true;
-						running_massage_type = -1;
-						debugprintf("\n\r ACK: STDBY COMPLETE");
+						if(stdby_in_progress) {
+							stdby_complete = true;
+							debugprintf("\n\r ACK: STDBY COMPLETE (legitimate)");
+							// 진짜 종료(전원키/포어스 리셋)일 때만 running_massage_type 클리어.
+							// 마사지 시작 시 ESP32가 init(호밍) 후 보내는 orphan STDBY ACK에서는
+							// 클리어하면 안 됨 → 나중에 마사지 화면 재진입 시 커서 자동 선택 실패.
+							running_massage_type = -1;
+						} else {
+							debugprintf("\n\r ACK: STDBY (orphan, ignored)");
+							// 마사지 시작 시 나오는 orphan STDBY ACK — running_massage_type 유지
+						}
 					}
 					else if(buff[ACTI_D + i] >= CMD2_MASSAGE && buff[ACTI_D + i] < (CMD2_MASSAGE + MASSAGE_MAX)){
+						// 마사지 시작 ACK — 즉시 bed_status 반영
 						running_massage_type = buff[ACTI_D + i] - CMD2_MASSAGE;
-						debugprintf("\n\r ACK: MASSAGE %d", running_massage_type + 1);
+						bed_status.current_mode = buff[ACTI_D + i];
+						bed_status.run_state = 1;
+						external_stopping = false;
+						pending_mode_start = true;	// state=3 transient를 stopping으로 잘못 감지하지 않도록
+						pending_mode_start_timeout = 150;	// 15초
+						smart_bed_display.display_refresh = true;
+						debugprintf("\n\r ACK: MASSAGE %d (pending_mode_start=on)", running_massage_type + 1);
+					}
+					// 다른 모드 시작 ACK들도 즉시 bed_status 반영
+					else if(buff[ACTI_D + i] == CMD2_DISPERSION ||
+					        buff[ACTI_D + i] == CMD2_VENTIL_STD ||
+					        buff[ACTI_D + i] == CMD2_VENTIL_FOCUS ||
+					        buff[ACTI_D + i] == CMD2_VENTIL_SLEEP ||
+					        buff[ACTI_D + i] == CMD2_HEAR ||
+					        buff[ACTI_D + i] == CMD2_MEAL ||
+					        buff[ACTI_D + i] == CMD2_READY_TILT ||
+					        buff[ACTI_D + i] == CMD2_TRENDELENBUG) {
+						bed_status.current_mode = buff[ACTI_D + i];
+						bed_status.run_state = 1;
+						external_stopping = false;
+						pending_mode_start = true;
+						pending_mode_start_timeout = 150;
+						smart_bed_display.display_refresh = true;
+						debugprintf("\n\r ACK: MODE 0x%02x (pending_mode_start=on)", buff[ACTI_D + i]);
+					}
+					else if(buff[ACTI_D + i] == CMD2_TILT_READY) {
+						// ESP32 tilt_care[] routine 완료 통지 → 리모컨 UI 좌/우 조그 활성화.
+						//   [재연결 대비] ESP32가 준비 상태 동안 2초마다 재전송 → 리모컨이 도중
+						//   끊겼다 재연결/재부팅해도 좌/우 분할 복원. 이미 true면 재전송이므로
+						//   불필요한 화면 refresh를 막기 위해 값이 바뀔 때만 갱신.
+						if(!tilt_care_ready){
+							tilt_care_ready = true;
+							smart_bed_display.display_refresh = true;
+							debugprintf("\n\r ACK: TILT_READY (jog UI enabled)");
+						}
+					}
+					else if(buff[ACTI_D + i] == CMD2_PAUSE) {
+						// 일시정지 ACK
+						if(bed_status.current_mode != 0) {
+							bed_status.run_state = 2;
+							smart_bed_display.display_refresh = true;
+							debugprintf("\n\r ACK: PAUSE");
+						}
+					}
+					else if(buff[ACTI_D + i] == CMD2_RESTART) {
+						// 재시작 ACK
+						if(bed_status.current_mode != 0) {
+							bed_status.run_state = 1;
+							smart_bed_display.display_refresh = true;
+							debugprintf("\n\r ACK: RESTART");
+						}
+					}
+					else if(buff[ACTI_D + i] == CMD2_FALL_ALERT){
+#if FALL_ALERT_UI_ENABLED
+						smart_bed_status.status = MODE_FALL_ALERT;
+						smart_bed_display.status = MODE_FALL_ALERT;
+						smart_bed_display.display_refresh = true;
+						debugprintf("\n\r *** FALL ALERT ***");
+#else
+						// 낙상 기능 미동작 — 화면 전환 없이 로그만 남긴다 (protocol.h: FALL_ALERT_UI_ENABLED)
+						debugprintf("\n\r *** FALL ALERT (UI disabled) ***");
+#endif
+					}
+					else if(buff[ACTI_D + i] == CMD2_FALL_CLEAR){
+						// 낙상 경고 화면일 때만 반응한다. 그 외 모드에서 화면을 뺏으면 안 된다.
+						// (FALL_ALERT_UI_ENABLED=0이면 이 조건이 성립하지 않아 무시된다.)
+						if(smart_bed_status.status == MODE_FALL_ALERT){
+							// 낙상 경고 중 확인창이 보류되어 있었으면 그쪽으로 복귀 (spec T8)
+							if(startup_confirm_active){
+								smart_bed_status.status = MODE_STARTUP_CONFIRM;
+								smart_bed_display.status = MODE_STARTUP_CONFIRM;
+								conform_hold_cnt = 0;
+								debugprintf("\n\r FALL ALERT CLEARED -> back to startup confirm");
+							} else {
+								smart_bed_status.status = MODE_HOME;
+								smart_bed_display.status = MODE_HOME;
+								debugprintf("\n\r FALL ALERT CLEARED");
+							}
+							smart_bed_display.display_refresh = true;
+						} else {
+							debugprintf("\n\r FALL CLEAR ignored (not in fall alert)");
+						}
 					}
 					break;
 				case CMD1_DATA_SYNC:	// ESP32 → 리모컨 설정 동기화
@@ -597,9 +693,9 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 					int body_idx = (data[0] >> 4) - 1;  // 0~3
 					if(body_idx < 0 || body_idx >= BODY_MAX) break;
 
-					if(act == CMD2_VENTIL_NORMAL || act == CMD2_VENTIL_FOCUR || act == CMD2_VENTIL_SLEEP)
+					if(act == CMD2_VENTIL_STD || act == CMD2_VENTIL_FOCUS || act == CMD2_VENTIL_SLEEP)
 					{	// 교대부양
-						int type = act - CMD2_VENTIL_NORMAL;  // 0=일반, 1=집중, 2=수면
+						int type = act - CMD2_VENTIL_STD;  // 0=일반, 1=집중, 2=수면
 						if(type >= 0 && type < LEVIT_MAX && dlen <= (BODY_LEVIT_MAX + 1))
 							memcpy(levitate[type].body[body_idx], data, dlen);
 					}
@@ -615,6 +711,169 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 							memcpy(massage[type].body[body_idx], data, dlen);
 					}
 					debugprintf("\n\r SYNC: act=0x%02x body[%d]", act, body_idx);
+					break;
+				}
+				case CMD1_BED_STATUS:	// 침대 상태 (2초 주기 수신)
+				{
+					U8 dlen = buff[i + LENGTH];
+					if(dlen >= sizeof(BED_STATUS_DATA)){
+						BED_STATUS_DATA new_status;
+						U8 esp_mode = buff[i+LENGTH+1];
+						U8 esp_state = buff[i+LENGTH+2];
+						U8 final_mode, final_state;
+						U8 prev_mode = bed_status.current_mode;
+						U8 prev_state = bed_status.run_state;
+						U8 prev_pending = prev_startup_pending;
+						U8 prev_powered = bed_status.powered_on;
+						// 통신 끊김 감지: 이 패킷 도착 직전까지 얼마나 조용했는지 (100ms 틱)
+						// > 30 (3초) 이면 ESP32가 잠시 offline이었다고 판단
+						bool esp32_was_silent = (bed_status_silence > 30);
+						memcpy(&new_status, &buff[i + LENGTH + 1], sizeof(BED_STATUS_DATA));
+
+						// [16] presence_detect / [17] bed_variant — 구조체(16B) 밖 별도 바이트.
+						//   신버전 메인보드만 실림(dlen>16, >17). 구버전이면 각 전역 기본값 유지.
+						if(dlen > 16) g_presence_detect = buff[i + LENGTH + 1 + 16];
+						if(dlen > 17) g_bed_variant     = buff[i + LENGTH + 1 + 17];
+
+						// GetBedStatus 응답 or 브로드캐스트 — 둘 다 여기로 온다 (spec §3)
+						boot_status_done = true;
+						master_booted = true;		// 마스터 부팅 완료 — 부팅 스피너 해제 신호
+						bed_status_silence = 0;		// 끊김 감지 리셋 (§7)
+
+						// [init_home_pending 클리어] — 시작 홈 완료 감지.
+						//   (a) 원상태 3→1 전이 = 홈(state=3) 끝나고 동작(state=1) 시작 → 즉시 클리어.
+						//       가장 확실한 신호. ①(시작 브로드캐스트)이 state=3든 1이든 무관하게 동작.
+						//   (b) 백업: state=1 packet 2개(①시작 + ③홈완료) 카운트.
+						//   → 홈이 끝나 건반이 상승하기 시작할 때 "종료중"→모드명 전환 + 카운트 시작.
+						//   (lock override 전 raw esp_state/esp_mode 사용 — 실제 ESP32 상태 반영)
+						static U8 prev_raw_esp_state = 0xFF;
+						if(init_home_pending && esp_mode != 0){
+							if(prev_raw_esp_state == 3 && esp_state == 1){
+								init_home_pending = false;
+								init_home_pending_timeout = 0;
+								smart_bed_display.display_refresh = true;
+								debugprintf("\n\r [INIT] home complete (raw 3->1, mode=0x%02x)", esp_mode);
+							} else if(esp_state == 1){
+								init_home_state1_count++;
+								if(init_home_state1_count >= 2){
+									init_home_pending = false;
+									init_home_pending_timeout = 0;
+									smart_bed_display.display_refresh = true;
+									debugprintf("\n\r [INIT] home complete (state1 count=2, mode=0x%02x)", esp_mode);
+								}
+							}
+						}
+						prev_raw_esp_state = esp_state;
+
+						// 로컬 상태 잠금 — ESP32가 로컬 상태 확인할 때까지 mode/state 보호
+						if(bed_state_lock_remain > 0){
+							if(new_status.current_mode == bed_status.current_mode &&
+							   new_status.run_state == bed_status.run_state){
+								bed_state_lock_remain = 0;
+							} else {
+								new_status.current_mode = bed_status.current_mode;
+								new_status.run_state = bed_status.run_state;
+							}
+						}
+						final_mode = new_status.current_mode;
+						final_state = new_status.run_state;
+						debugprintf("\n\r [RX] ESP32: mode=0x%02x state=%d | applied: mode=0x%02x state=%d (lock=%d)",
+							esp_mode, esp_state, final_mode, final_state, bed_state_lock_remain);
+						memcpy(&bed_status, &new_status, sizeof(BED_STATUS_DATA));
+
+						// ---- 볼륨(음량) 동기화 ----
+						// ESP32가 보고하는 실제 볼륨(NVS 유지값)으로 리모컨 LED/카운터를 맞춘다.
+						// 전원 재부팅/초기화 후에도 저장된 음량이 LED에 그대로 반영된다.
+						// 단, 사용자가 방금 조절 중(vol_lock_remain>0)이면 왕복 지연 중 되돌림 방지를 위해 건너뛴다.
+						if(vol_lock_remain == 0 && bed_status.volume_level <= 3 &&
+						   volume.body[0][0] != bed_status.volume_level){
+							volume.body[0][0] = bed_status.volume_level;
+							volume_led_ctrl(bed_status.volume_level);
+						}
+
+						// ================= 부팅 확인창 관련 전이 (spec §5.3 / §5.4) =================
+						// 주의: bed_state_lock_remain은 mode/state만 덮어쓰고 startup_pending은 통과시킨다.
+						//
+						// [1] pending 0→1 : Master watchdog 복구 또는 Master 재부팅.
+						//     watchdog 복구는 run_state 3→0 과 pending 0→1 을 같은 패킷에 실어 보낸다.
+						//     그래서 반드시 Path B보다 먼저 평가해야 한다. 순서를 바꾸면
+						//     watchdog 복구를 홈 완료로 오인하여 확인창 대신 일반 UI로 들어간다.
+						// [침대 재부팅 감지] 다음 중 하나라도 성립하면 ESP32가 재부팅한 것으로 판정.
+						//   (1) startup_pending 0→1 전환 (기존 케이스 — 정상 상황)
+						//   (2) 3초 이상 통신 끊김 후 startup_pending=1 수신
+						//       (예: prev가 이미 1이었는데 ESP32가 재부팅. transition은 안 뜨지만 silence로 감지)
+						//   (3) powered_on 1→0 + startup_pending=1 (ESP32 부팅 직후 상태)
+						bool bed_rebooted =
+							(bed_status.startup_pending == 1) &&
+							((prev_pending == 0) || esp32_was_silent ||
+							 (prev_powered == 1 && bed_status.powered_on == 0));
+
+						if(bed_rebooted){
+							debugprintf("\n\r [REBOOT] master reboot detected (prev_pending=%d, silence=%d, prev_pwr=%d->%d)",
+								prev_pending, esp32_was_silent, prev_powered, bed_status.powered_on);
+							stdby_in_progress = false;
+							stdby_complete = false;
+							stdby_timeout = 0;
+							// ESP32의 heat_level/volume은 0으로 초기화됨 → 리모컨도 동기화
+							// 내부 상태 + LED 모두 리셋 (사용자가 이전 상태로 오해하지 않도록)
+							heat.body[0][0] = 0;
+							heat_led_ctrl(0);
+							if(power){
+								startup_confirm_active = true;
+								conform_hold_cnt = 0;
+								// 낙상 경고가 떠 있으면 그 화면이 우선 (spec §9, T8).
+								// 확인창은 낙상 해제(CMD2_FALL_CLEAR) 후에 표시된다.
+								if(smart_bed_status.status != MODE_FALL_ALERT){
+									smart_bed_status.status = MODE_STARTUP_CONFIRM;
+									smart_bed_display.status = MODE_STARTUP_CONFIRM;
+								}
+							}
+							// power==false(LCD OFF)면 플래그만 유지. 다음 전원키 누름에서 확인창 진입.
+						}
+						// [2] Path B — 브로드캐스트로 홈 완료 감지.
+						//     stdby_in_progress를 가드에 넣지 말 것. 이 경로가 필요한 두 경우 모두
+						//     그 값이 false다: (a) 리모컨이 STDBY를 보내지 않음(홈 중 재부팅),
+						//     (b) 돌봄케어 모드 중 홈 — Master가 ActionEcho를 아예 보내지 않는다.
+						else if(prev_state == 3 && final_state == 0 && bed_status.startup_pending == 0){
+							if(stdby_in_progress){
+								debugprintf("\n\r [PATH B] run_state 3->0 -> homing done");
+								stdby_in_progress = false;
+								stdby_complete = false;
+								stdby_timeout = 0;
+							}
+							if(smart_bed_status.status == MODE_STARTUP_CONFIRM){
+								startup_confirm_active = false;
+								smart_bed_status.status = MODE_HOME;
+								smart_bed_display.status = MODE_HOME;
+							}
+						}
+						prev_startup_pending = bed_status.startup_pending;
+
+						// pending_pwr_on_check: REMO_PWR_ON에서 bed_status 기반으로 즉시 결정 (불필요)
+
+						// 외부(태블릿) 종료 전환 감지
+						// pending_mode_start / init_home_pending 중에는 모드 시작 시의 state=3 (init)을
+						//   stopping으로 잘못 감지하지 않도록 skip (ACK가 늦게 와도 시작 홈 동안 "종료중" 방지).
+						if(!stdby_in_progress && !pending_mode_start && !init_home_pending &&
+						   (prev_state == 1 || prev_state == 2) &&
+						   (final_state == 3 || (final_state == 0 && prev_mode != 0))) {
+							if(!external_stopping){
+								external_stopping = true;
+								external_stopping_timeout = 200;	// 20초 안전 timeout
+								external_stopping_min_remain = 20;	// 최소 2초 표시 (직접 1→0 전환에도 보이게)
+								debugprintf("\n\r [EXT STOPPING] state %d->%d, mode 0x%02x->0x%02x",
+									prev_state, final_state, prev_mode, final_mode);
+							}
+						}
+						// 안정 상태 (mode=0, state=0) → 최소 표시 시간 후 clear
+						if(final_mode == 0 && final_state == 0 && external_stopping &&
+						   external_stopping_min_remain == 0) {
+							external_stopping = false;
+							debugprintf("\n\r [EXT STOPPING] cleared (stable idle)");
+						}
+
+						smart_bed_display.display_refresh = true;
+					}
 					break;
 				}
 			}
@@ -638,31 +897,27 @@ bool esp32_packet_parsing_bar_body(U8 *buff, int leng)
 	rx_leng = uart_getdata(ESP32_UART_CH, tmp_buff, RX_MAX_NUM/2);// uart data get
 	if(rx_leng)
 	{// 수신된 data가 있으면
-		for(i=0; i<rx_leng; i++) debugprintf("\n\r 0x%x", tmp_buff[i]);
+		// [디버그 출력 제거] 매 바이트 debugprintf가 고주파 패킷 환경에서
+		// UART 블로킹을 일으켜 RX 버퍼 오버플로 가속 — 제거함.
 		esp32_uart.rx_flag = true;
-		//rx_cnt += rx_leng;
-		
+
 		if((esp32_uart.rx_write_pointer + rx_leng) >  RX_MAX_NUM)
-        {// max buffer size over
-			pack_leng = (esp32_uart.rx_write_pointer + rx_leng)  - esp32_uart.rx_read_pointer;
-            memcpy( &esp32_uart.rx_buff[esp32_uart.rx_write_pointer], tmp_buff, (RX_MAX_NUM - esp32_uart.rx_write_pointer) );
-            memcpy( esp32_uart.rx_buff, &tmp_buff[RX_MAX_NUM - esp32_uart.rx_write_pointer], (esp32_uart.rx_write_pointer- rx_leng) );
-            esp32_uart.rx_write_pointer = (esp32_uart.rx_write_pointer + rx_leng) - RX_MAX_NUM;
-			debugprintf("\n\r ddd [%d] %d]", esp32_uart.rx_write_pointer,esp32_uart.rx_write_pointer + rx_leng);
-			debugprintf("\n\r cccc [%d] [%d] ", esp32_uart.rx_write_pointer );
-			PRINTLINE;
+        {// [버퍼 오버플로] 기존 코드의 ring 버퍼 wrap memcpy 길이가
+			// 잘못 계산되어 큰 영역을 덮어쓰는 버그 — 안전하게 reset 처리
+			esp32_uart.rx_read_pointer = 0;
+			esp32_uart.rx_write_pointer = 0;
+			memcpy(&esp32_uart.rx_buff[0], tmp_buff, rx_leng);
+			esp32_uart.rx_write_pointer = rx_leng;
+			pack_leng = rx_leng;
         }
         else
         {
             memcpy(&esp32_uart.rx_buff[esp32_uart.rx_write_pointer], tmp_buff, rx_leng);
             esp32_uart.rx_write_pointer += rx_leng;
 			pack_leng = esp32_uart.rx_write_pointer - esp32_uart.rx_read_pointer;
-			debugprintf("\n\r pack_leng[%d] w[%d] r[%d]", pack_leng, esp32_uart.rx_write_pointer , esp32_uart.rx_read_pointer);
-			PRINTLINE;
         }
 		if(pack_leng >= LENGTH)
 		{
-			PRINTLINE;
 			esp32_packet_parsing_bar_body(&esp32_uart.rx_buff[esp32_uart.rx_read_pointer], pack_leng);
 		}
 		esp32_uart.rx_time_count = *((volatile unsigned int*)TMCNT_ADDR(SYS_TIMER_CH));// get timer count

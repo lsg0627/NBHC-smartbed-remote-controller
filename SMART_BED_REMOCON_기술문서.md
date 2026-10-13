@@ -44,7 +44,7 @@
 │  ┌──┴┐┌┴──┐┌┴──────┐  ┌────────┐  ┌──────┐  ┌────────┐  │
 │  │LCD││SPI││NAND   │  │ LED x6 │  │ USB  │  │UART0   │  │
 │  │ILI││KEY││Flash  │  │온열 x3 │  │ Host │  │Debug   │  │
-│  │948││입력││(FAT)  │  │통풍 x3 │  │      │  │115200  │  │
+│  │948││입력││(FAT)  │  │음량 x3 │  │      │  │115200  │  │
 │  │8  ││   ││       │  │        │  │      │  │        │  │
 │  │320││시프││이미지  │  │P3.0~4  │  │P8.1~2│  │P1.0    │  │
 │  │x  ││트 ││폰트   │  │P4.4    │  │      │  │        │  │
@@ -78,7 +78,7 @@
     │                          │
     │  [설정/저장]    [초기화]   │
     │                          │
-    │  [온열]        [통풍]     │
+    │  [온열]        [음량]     │
     │  ● ● ●        ● ● ●     │
     │                          │
     │        NINEBELL           │
@@ -140,8 +140,8 @@
 | P3.0 | OUT | LED | 온열 LED 3 |
 | P3.1 | OUT | LED | 온열 LED 2 |
 | P3.2 | OUT | LED | 온열 LED 1 |
-| P3.3 | OUT | LED | 통풍 LED 3 |
-| P3.4 | OUT | LED | 통풍 LED 2 |
+| P3.3 | OUT | LED | 음량 LED 3 |
+| P3.4 | OUT | LED | 음량 LED 2 |
 | P3.5 | OUT | GPIO | LCD 백라이트 ON/OFF |
 | P3.6 | OUT | GPIO | 키 시프트 레지스터 1 LATCH |
 | P3.7 | OUT | GPIO | 키 시프트 레지스터 1 CS |
@@ -154,7 +154,7 @@
 | P4.1 | OUT | GPIO | 키 시프트 레지스터 0 CS |
 | P4.2 | OUT | UART_TX1 | ESP32 송신 |
 | P4.3 | IN | UART_RX1 | ESP32 수신 |
-| P4.4 | OUT | LED | 통풍 LED 1 |
+| P4.4 | OUT | LED | 음량 LED 1 |
 | P4.5 | OUT | GPIO | 미사용 |
 | P4.6 | - | SPI_SCK1 | LCD / 키 SPI 클럭 |
 | P4.7 | OUT | GPIO | LCD SPI CS |
@@ -267,7 +267,6 @@ typedef enum {
     MODE_MASSAGE,         // 마사지
     MODE_PATIENT_CARE,    // 돌봄케어
     MODE_HEAT,            // 온열
-    MODE_VENTILATION,     // 통풍
     MODE_SET_SAVE,        // 설정/저장
     MODE_INITIAL,         // 초기화
     MODE_SHUTDOWN,        // 종료 화면 ("종료합니다.")
@@ -448,7 +447,7 @@ get_spi_key()
 | 9 | `LEFT_KEY` | ← | 서브 타입 이동 / 값 감소 |
 | 10 | `RIGHT_KEY` | → | 서브 타입 이동 / 값 증가 |
 | 11 | `HEAT_KEY` | 온열 | MODE_HEAT 진입 |
-| 12 | `VENTIL_KEY` | 통풍 | MODE_VENTILATION 진입 |
+| 12 | `VOLUME_KEY` | 음량 | LED + 음량 단계 순환 (화면 없음, 구 VENTIL_KEY/통풍) |
 | 13 | `SET_KEY` | 설정/저장 | MODE_SET_SAVE 진입 |
 | 14 | `INIT_KEY` | 초기화 | MODE_INITIAL 진입 |
 
@@ -511,7 +510,7 @@ key_read()
     ├── MASSA_KEY    → status = MODE_MASSAGE        // 마사지
     ├── CARE_KEY     → status = MODE_PATIENT_CARE   // 돌봄케어
     ├── HEAT_KEY     → status = MODE_HEAT           // 온열
-    ├── VENTIL_KEY   → status = MODE_VENTILATION    // 통풍
+    ├── VOLUME_KEY   → LED + 음량 단계 순환 (화면 없음)  // 음량
     ├── SET_KEY      → key_val = SET_KEY            // 설정/저장
     └── INIT_KEY     → status = MODE_INITIAL        // 초기화
 ```
@@ -612,7 +611,7 @@ CRTC 타이밍 (HVSYNC 60Hz @ 12MHz):
                                 │ 기능 키 입력
     ┌──────┬──────┬──────┬──────┼──────┬──────┬──────┐
     ▼      ▼      ▼      ▼      ▼      ▼      ▼      ▼
-  체압    교대    마사    돌봄    온열    통풍    설정    초기화
+  체압    교대    마사    돌봄    온열    음량    설정    초기화
   분산    부양    지      케어                   저장
   (1)     (2)    (3)     (4)    (5)    (6)     (7)    (8)
     │      │      │       │      │      │       │      │
@@ -709,7 +708,6 @@ void progress_lcd_display() {
             case MODE_MASSAGE:    massage_draw();           break;
             case MODE_PATIENT_CARE: patient_care_draw();    break;
             case MODE_HEAT:       heat_draw();              break;
-            case MODE_VENTILATION: ventilation_draw();      break;
             case MODE_SET_SAVE:   manual_selft_test_draw(); break;
             case MODE_INITIAL:    initial_draw();           break;
             case MODE_SHUTDOWN:   shutdown_draw();          break;
@@ -804,7 +802,7 @@ void progress_lcd_display() {
 | `0x51` | 온열 1단 | - |
 | `0x52` | 온열 2단 | - |
 | `0x53` | 온열 3단 | - |
-| `0x60` | 통풍 | 단계 |
+| `0xB0`~`0xB3` | 음량 (Mute/25/50/100) | 단계 |
 | `0x70` | 일시정지 | - |
 | `0x71` | 재동작 | - |
 
@@ -990,11 +988,13 @@ void shutdown_draw(void) {
 - 각 단계별 LED 1개씩 점등 (P3.0~P3.2)
 - ESP32에 CMD2: 0x50(OFF) ~ 0x53(3단) 전송
 
-### 9.7 통풍 (MODE_VENTILATION)
+### 9.7 음량 (VOLUME)
 
-4단계 제어 (OFF/1단/2단/3단):
-- 각 단계별 LED 1개씩 점등 (P3.3, P3.4, P4.4)
-- ESP32에 CMD2: 0x60 + 단계값 전송
+> **참고**: 이 버튼(bit 14)은 예전에 **통풍(MODE_VENTILATION)** 화면/기능에 사용되었으나, 통풍 기능과 전용 화면은 삭제되었고 현재는 **음량** 조절 전용으로만 사용됩니다. 별도 화면 없이 key.c에서 직접 처리됩니다.
+
+4단계 제어 (Mute/25/50/100):
+- 각 단계별 LED 누적 점등 (P3.4, P3.3, P4.4)
+- ESP32에 CMD2: 0xB0(Mute) ~ 0xB3(100) 전송
 
 ### 9.8 설정/저장 (MODE_SET_SAVE)
 
@@ -1003,7 +1003,7 @@ void shutdown_draw(void) {
 ```
 ├── 수동 (Manual)     → 수동 설정 모드
 └── 셀프 테스트 (Self Test) → 하드웨어 자가 진단
-    ├── ESP32 통신 테스트 (오디오, 온열, 통풍)
+    ├── ESP32 통신 테스트 (오디오, 온열)
     ├── 키 입력 테스트
     └── LED 테스트
 ```
@@ -1019,8 +1019,8 @@ void shutdown_draw(void) {
     ├── dispersion_value_power_init()
     ├── massage_value_power_init()
     ├── patient_care_value_power_init()
-    ├── heat_value_power_init()
-    └── ventilation_value_power_init()
+    └── heat_value_power_init()
+    // 음량(volume)은 초기화 시 재설정하지 않고 ESP32 보고값(NVS 유지)으로 유지
 ```
 
 ---
@@ -1038,16 +1038,16 @@ void shutdown_draw(void) {
 - Active Low (LOW=ON, HIGH=OFF)
 - `heat_led_ctrl(0~3)` 함수로 제어
 
-### 10.2 통풍 LED (3개)
+### 10.2 음량 LED (3개) — 왼쪽부터 누적 점등
 
-| LED | 포트 | 1단 | 2단 | 3단 |
+| LED | 포트 | 25 | 50 | 100 |
 |-----|------|-----|-----|-----|
-| LED 1 | P4.4 | ON | OFF | OFF |
-| LED 2 | P3.4 | OFF | ON | OFF |
-| LED 3 | P3.3 | OFF | OFF | ON |
+| LED 1 | P3.4 | ON | ON | ON |
+| LED 2 | P3.3 | OFF | ON | ON |
+| LED 3 | P4.4 | OFF | OFF | ON |
 
 - Active Low (LOW=ON, HIGH=OFF)
-- `ventilation_led_ctrl(0~3)` 함수로 제어
+- `volume_led_ctrl(0~3)` 함수로 제어 (구 `ventilation_led_ctrl`)
 
 ---
 
@@ -1103,9 +1103,7 @@ void shutdown_draw(void) {
 | **온열** | rc_title_bar_heat.suf | 타이틀 바 |
 | | main_icon_heat.suf | 메인 아이콘 |
 | | hit_on.suf, hit_off.suf | ON/OFF 표시 |
-| **통풍** | rc_title_bar_ventilat.suf | 타이틀 바 |
-| | main_icon_ventilat.suf | 메인 아이콘 |
-| | wind_on.suf, wind_off.suf | ON/OFF 표시 |
+| **~~통풍~~** | (삭제됨) | 통풍 화면 삭제로 미사용 — 해당 버튼은 음량 전용, 전용 이미지/화면 없음 (구 rc_title_bar_ventilat.suf, main_icon_ventilat.suf, wind_on/off.suf) |
 | **설정** | rc_title_bar_set.suf | 타이틀 바 |
 | | main_icon_set.suf | 메인 아이콘 |
 | | top_manual_btn_default/focused.suf | 수동 모드 버튼 |

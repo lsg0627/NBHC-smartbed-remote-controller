@@ -1,22 +1,23 @@
 #pragma once
 
-#define INIT_KEY		(1<<12) // 초기화
-#define SET_KEY		(1<<11)	// 설정 저장
-#define VENTIL_KEY (1<<14)	// 통풍
-#define HEAT_KEY	(1<<13)	// 온열
-#define RIGHT_KEY	(1<<10)	// right
-#define LEFT_KEY		(1<<9)
-#define DOWN_KEY	(1<<8)
-#define UP_KEY		(1<<6)
-#define CONFORM_KEY	(1<<5)	// 확인
-#define CARE_KEY	(1<<4)	// 환자케어
-#define MASSA_KEY	(1<<3)	// 마사지
-#define LEVITATE_KEY		(1<<2)	// 교대부양
-#define VAIRANCE_KEY	(1<<1)	// 체압분산
-#define POWER_KEY	(1<<0)	// 전원
+// 비트 14, 15 미사용 (get_spi_key에서 byte 1을 1비트 시프트 다운하여 비트 7 gap 제거)
+#define VOLUME_KEY	(1<<13)	// 음량
+#define HEAT_KEY	(1<<12)	// 온열
+#define GRAVITY_KEY	(1<<11)	// 무중력 (무중력 ↔ 플랫 토글)
+#define SET_KEY		(1<<10)	// 설정/저장
+#define RIGHT_KEY	(1<<9)	// 우 / 값 증가
+#define LEFT_KEY	(1<<8)	// 좌 / 값 감소
+#define DOWN_KEY	(1<<7)	// 커서 아래
+#define UP_KEY		(1<<6)	// 커서 위
+#define CONFORM_KEY	(1<<5)	// 확인 (시작/일시정지/재시작)
+#define POSTURE_KEY	(1<<4)	// 자세제어 (MODE_POSTURE 토글)
+#define CARE_KEY	(1<<3)	// 돌봄케어 (MODE_PATIENT_CARE)
+#define MASSAGE_KEY	(1<<2)	// 마사지 (MODE_MASSAGE)
+#define ULCER_KEY	(1<<1)	// 욕창케어 (MODE_ULCER_CARE)
+#define POWER_KEY	(1<<0)	// 전원 (ON / STDBY)
 
-#define KEY_MASK	0x7F7F
-#define KEY_CNT	5
+#define KEY_MASK	0x3FFF	// 비트 0~13 사용, 비트 14/15 미사용
+#define KEY_CNT	1	// 디바운스 안정 프레임 수(반응 최대화 5→1). 0=디바운스 없음(노이즈 위험). 오작동 시 2~3으로.
 #define LONG_KEY_CNT	300	// 롱클릭 판정 (~3초)
 
 #define CURSOR_MODE	0
