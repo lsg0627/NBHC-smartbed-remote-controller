@@ -68,17 +68,23 @@ U16 k;
 		// Timer event handler
 		process_target_time_handler();
 		// UART even handler
-		
+
 		// KEY event handler
 		key_read();
-		// key input & uart input 
+		// key input & uart input
 		process_analy_data();
-		
-		esp32_get_info_bar_body();
-		
+
+		// [키 우선] 키가 눌려/판정 중이면 ESP 텔레메트리 파싱을 미뤄(버퍼가 보관) 루프를 가볍게 유지.
+		//   → 키 디바운스/처리가 ESP 데이터 처리에 밀려 씹히는 것 방지.
+		if((remocon_key.current & KEY_MASK) == KEY_MASK)	// 아무 키도 안 눌렸을 때만 ESP 처리
+			esp32_get_info_bar_body();
+
+		// [키 우선] 한 바퀴에 키를 한 번 더 폴링 → 디바운스 2배 빠름(반응 향상)
+		key_read();
+
 		// IMAGE event handler
 		progress_lcd_display();
-		
+
 	}
 	return 0;
 }

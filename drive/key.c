@@ -72,7 +72,14 @@ U16 get_spi_key(void){
 	key1 = *R_SPI0DATA(1);
 	KEY_CS_HIGH1();
 	delayus(100);
-	return ((key1<<8) | key0);
+	// 비트 배치 압축: 원래 byte1(비트 8~15)를 1비트 아래로 시프트하여 비트 7~14에 배치
+	// → 원래의 비트 7 gap을 제거하고, 사용 비트를 0~13으로 연속 배치.
+	// (비트 14, 15는 미사용, KEY_MASK 0x3FFF에서 제외됨)
+	{
+		U16 low  = (U16)(key0 & 0x7F);       // 비트 0~6 그대로 (기존과 동일)
+		U16 high = (U16)(key1 & 0xFF);       // byte1 전체 8비트
+		return low | (high << 7);            // high를 비트 7~14에 배치
+	}
 }
 
 
@@ -241,6 +248,7 @@ void key_read(void){
 				stdby_timeout = STDBY_TIMEOUT_TICKS;
 				stdby_initial_mode = bed_status.current_mode;
 				bed_state_lock_remain = 100;	// 2초 잠금
+				tilt_care_ready = false;	// 틸트 종료 → 좌/우 분할 해제(단일 "틸팅" 박스로 복원)
 				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_STDBY, &tmp, 0);
 				smart_bed_status.status = MODE_HOME;
 				smart_bed_display.display_refresh = true;
@@ -297,27 +305,28 @@ void key_read(void){
 			bool up_held = !(remocon_key.current & UP_KEY);
 			bool down_held = !(remocon_key.current & DOWN_KEY);
 			U8 tmp = 0;
+			bool prev_up = posture_up_active, prev_down = posture_down_active;
 
 			// UP 키 누름 → 모터 올림
 			if(up_held && !posture_up_active){
 				posture_up_active = true;
 				if(cursor.type == POSTURE_BACK || cursor.type == POSTURE_ALL)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_UP, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_UP_POSTURE_BACK, &tmp, 0);
 				if(cursor.type == POSTURE_LEG || cursor.type == POSTURE_ALL)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_UP, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_UP_POSTURE_LEG, &tmp, 0);
 				if(cursor.type == POSTURE_HEIGHT)	// 높이: 침대 전체 올림 (홀드)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_UP, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_UP_HEIGHT, &tmp, 0);
 				debugprintf("\n\r POSTURE: MOTOR UP (type=%d)", cursor.type);
 			}
 			// UP 키 뗌 → 모터 정지
 			if(!up_held && posture_up_active){
 				posture_up_active = false;
 				if(cursor.type == POSTURE_BACK || cursor.type == POSTURE_ALL)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_POSTURE_BACK, &tmp, 0);
 				if(cursor.type == POSTURE_LEG || cursor.type == POSTURE_ALL)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_POSTURE_LEG, &tmp, 0);
 				if(cursor.type == POSTURE_HEIGHT)	// 높이: 뗌 시 정지
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_HEIGHT, &tmp, 0);
 				debugprintf("\n\r POSTURE: MOTOR UP STOP");
 			}
 
@@ -325,31 +334,36 @@ void key_read(void){
 			if(down_held && !posture_down_active){
 				posture_down_active = true;
 				if(cursor.type == POSTURE_BACK || cursor.type == POSTURE_ALL)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_DOWN, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_DOWN_POSTURE_BACK, &tmp, 0);
 				if(cursor.type == POSTURE_LEG || cursor.type == POSTURE_ALL)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_DOWN, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_DOWN_POSTURE_LEG, &tmp, 0);
 				if(cursor.type == POSTURE_HEIGHT)	// 높이: 침대 전체 내림 (홀드)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_DOWN, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_DOWN_HEIGHT, &tmp, 0);
 				debugprintf("\n\r POSTURE: MOTOR DOWN (type=%d)", cursor.type);
 			}
 			// DOWN 키 뗌 → 모터 정지
 			if(!down_held && posture_down_active){
 				posture_down_active = false;
 				if(cursor.type == POSTURE_BACK || cursor.type == POSTURE_ALL)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_POSTURE_BACK, &tmp, 0);
 				if(cursor.type == POSTURE_LEG || cursor.type == POSTURE_ALL)
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_POSTURE_LEG, &tmp, 0);
 				if(cursor.type == POSTURE_HEIGHT)	// 높이: 뗌 시 정지
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_HEIGHT, &tmp, 0);
 				debugprintf("\n\r POSTURE: MOTOR DOWN STOP");
 			}
+
+			// 화살표 표시(눌림색/상하한 숨김) 실시간 갱신: 홀드 중이거나 눌림/뗌 순간
+			if(up_held || down_held ||
+			   prev_up != posture_up_active || prev_down != posture_down_active)
+				smart_bed_display.display_refresh = true;
 		} else {
 			// 자세제어 모드가 아닌데 모터가 동작 중이면 강제 정지
 			if(posture_up_active || posture_down_active){
 				U8 tmp = 0;
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_HEIGHT_STOP, &tmp, 0);
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_POSTURE_BACK, &tmp, 0);
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_POSTURE_LEG, &tmp, 0);
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_HEIGHT, &tmp, 0);
 				posture_up_active = false;
 				posture_down_active = false;
 				debugprintf("\n\r POSTURE: MODE EXIT -> ALL STOP");
@@ -369,22 +383,22 @@ void key_read(void){
 
 				if(up_held && !care_up_active){
 					care_up_active = true;
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_UP, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_UP_POSTURE_BACK, &tmp, 0);
 					debugprintf("\n\r CARE JOG: UP");
 				}
 				if(!up_held && care_up_active){
 					care_up_active = false;
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_POSTURE_BACK, &tmp, 0);
 					debugprintf("\n\r CARE JOG: UP STOP");
 				}
 				if(down_held && !care_down_active){
 					care_down_active = true;
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_DOWN, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_DOWN_POSTURE_BACK, &tmp, 0);
 					debugprintf("\n\r CARE JOG: DOWN");
 				}
 				if(!down_held && care_down_active){
 					care_down_active = false;
-					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
+					esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_POSTURE_BACK, &tmp, 0);
 					debugprintf("\n\r CARE JOG: DOWN STOP");
 				}
 			}
@@ -400,9 +414,9 @@ void key_read(void){
 
 				if(want != care_tilt_dir){
 					U8 cmd;
-					if(want == 1)      cmd = (tilt_sel == 0) ? CMD2_MOVE_LEFT      : CMD2_MOVE_RIGHT;
-					else if(want == 2) cmd = (tilt_sel == 0) ? CMD2_MOVE_LEFT_DOWN : CMD2_MOVE_RIGHT_DOWN;
-					else               cmd = CMD2_MOVE_CENTER;	// 정지(제자리)
+					if(want == 1)      cmd = (tilt_sel == 0) ? CMD2_UP_LEFT_TILT      : CMD2_UP_RIGHT_TILT;
+					else if(want == 2) cmd = (tilt_sel == 0) ? CMD2_DOWN_LEFT_TILT : CMD2_DOWN_RIGHT_TILT;
+					else               cmd = CMD2_PAUSE_TILT;	// 정지(제자리)
 					esp32_packet_send(CMD1_SEND_RUN_ST, cmd, &tmp, 0);
 					care_tilt_dir = want;
 					care_tilt_active = (want != 0);
@@ -414,14 +428,14 @@ void key_read(void){
 			// 케어 모드 벗어나면 조그 강제 정지
 			if(care_up_active || care_down_active){
 				U8 tmp = 0;
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_POSTURE_BACK, &tmp, 0);
 				care_up_active = false;
 				care_down_active = false;
 				debugprintf("\n\r CARE JOG: EXIT -> UP/DOWN STOP");
 			}
 			if(care_left_active || care_right_active || care_tilt_active){
 				U8 tmp = 0;
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_MOVE_CENTER, &tmp, 0);
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_TILT, &tmp, 0);
 				care_left_active = false;
 				care_right_active = false;
 				care_tilt_active = false;
@@ -474,45 +488,53 @@ void key_read(void){
 			remocon_key.key_val = RIGHT_KEY;
 			return;
 		}
-// 체압분산
-		if(!(remocon_key.current & VAIRANCE_KEY)){
-			debugprintf("\n\r KEY : VAIRANCE_KEY (욕창케어)");
+// 욕창케어
+		if(!(remocon_key.current & ULCER_KEY)){
+			debugprintf("\n\r KEY : ULCER_KEY (욕창케어)");
 			smart_bed_status.status = MODE_ULCER_CARE;
-			remocon_key.key_val = VAIRANCE_KEY;
+			remocon_key.key_val = ULCER_KEY;
 			return;
 		}
-// 마사지 (LEVITATE_KEY 물리위치)
-		if(!(remocon_key.current & LEVITATE_KEY)){
-			debugprintf("\n\r KEY : LEVITATE_KEY (마사지)");
+// 마사지
+		if(!(remocon_key.current & MASSAGE_KEY)){
+			debugprintf("\n\r KEY : MASSAGE_KEY (마사지)");
 			smart_bed_status.status = MODE_MASSAGE;
-			remocon_key.key_val = LEVITATE_KEY;
+			remocon_key.key_val = MASSAGE_KEY;
 			return;
 		}
-		
-// 돌봄케어 (MASSA_KEY 물리위치)
-		if(!(remocon_key.current & MASSA_KEY)){
-			debugprintf("\n\r KEY : MASSA_KEY (돌봄케어)");
-			smart_bed_status.status = MODE_PATIENT_CARE;
-			remocon_key.key_val = MASSA_KEY;
-			return;
-		}
-// 자세제어 (CARE_KEY 물리위치 → 자세제어 토글)
+
+// 돌봄케어
 		if(!(remocon_key.current & CARE_KEY)){
+			debugprintf("\n\r KEY : CARE_KEY (돌봄케어)");
+			smart_bed_status.status = MODE_PATIENT_CARE;
+			remocon_key.key_val = CARE_KEY;
+			return;
+		}
+// 자세제어 (토글)
+		if(!(remocon_key.current & POSTURE_KEY)){
+			// [돌봄 보호] 돌봄 모드 동작 중엔 자세제어 진입 금지 + 안내 메시지.
+			if(is_care_mode_running()){
+				debugprintf("\n\r KEY : POSTURE blocked (care running)");
+				care_block_msg_remain = 30;	// 3초 안내
+				smart_bed_display.display_refresh = true;
+				remocon_key.key_val = POSTURE_KEY;
+				return;
+			}
 			if(smart_bed_status.status == MODE_POSTURE){
 				U8 tmp = 0;
-				debugprintf("\n\r KEY : CARE_KEY POSTURE -> HOME (ALL STOP)");
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_BACK_STOP, &tmp, 0);
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_POSTURE_LEG_STOP, &tmp, 0);
+				debugprintf("\n\r KEY : POSTURE_KEY POSTURE -> HOME (ALL STOP)");
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_POSTURE_BACK, &tmp, 0);
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_PAUSE_POSTURE_LEG, &tmp, 0);
 				posture_up_active = false;
 				posture_down_active = false;
 				smart_bed_status.status = MODE_HOME;
 				smart_bed_display.status = MODE_HOME;
 			} else {
-				debugprintf("\n\r KEY : CARE_KEY -> POSTURE");
+				debugprintf("\n\r KEY : POSTURE_KEY -> POSTURE");
 				smart_bed_status.status = MODE_POSTURE;
 			}
 			smart_bed_display.display_refresh = true;
-			remocon_key.key_val = CARE_KEY;
+			remocon_key.key_val = POSTURE_KEY;
 			return;
 		}
 // 온열 (화면 전환 없이 LED + 설정값만 순환)
@@ -534,32 +556,43 @@ void key_read(void){
 				volume.body[0][0] = 0;
 			debugprintf("\n\r KEY : VOLUME level=%d", volume.body[0][0]);
 			volume_led_ctrl(volume.body[0][0]);
-			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_VOLUME + volume.body[0][0], &tmp, 0);
+			esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_VOLUME0 + volume.body[0][0], &tmp, 0);
 			// 방금 조절 → 2초간 ESP 상태 패킷의 볼륨 되동기화 차단 (왕복 지연 중 되돌림 방지)
 			vol_lock_remain = 20;
 			return;
 		}
-// 설정/저장
+// 설정/저장 — 어느 화면에서든 설정 진입 (설정 화면에서 SET → proc이 HOME으로 토글)
+//   단, 안전 화면(낙상 경고/부팅 확인)에서는 진입 금지.
 		if(!(remocon_key.current & SET_KEY)){
 			debugprintf("\n\r KEY : SET_KEY");
-			if(smart_bed_status.status == MODE_HOME)
+			// 마사지·욕창케어 화면에선 설정 화면(MODE_SET_SAVE)로 가지 않고, 각 proc이 설정창(슬라이드업)으로 처리.
+			if(smart_bed_status.status != MODE_FALL_ALERT &&
+			   smart_bed_status.status != MODE_STARTUP_CONFIRM &&
+			   smart_bed_status.status != MODE_MASSAGE &&
+			   smart_bed_status.status != MODE_ULCER_CARE)
 				smart_bed_status.status = MODE_SET_SAVE;
 			remocon_key.key_val = SET_KEY;
 			return;
 		}
-// 무중력 (INIT_KEY 물리위치 → 무중력 ↔ 플랫 토글)
-		if(!(remocon_key.current & INIT_KEY)){
+// 무중력 (무중력 ↔ 플랫 토글)
+		if(!(remocon_key.current & GRAVITY_KEY)){
 			static bool gravity_flat_toggle = false;	// false→무중력, true→플랫(수평)
 			U8 tmp = 0;
+			// [돌봄 보호] 돌봄 모드 동작 중엔 무중력/플랫 무반응 (아무 변화 없음).
+			if(is_care_mode_running()){
+				debugprintf("\n\r KEY : GRAVITY blocked (care running)");
+				remocon_key.key_val = GRAVITY_KEY;
+				return;
+			}
 			if(!gravity_flat_toggle){
-				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_GRAVITY, &tmp, 0);
+				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_ZERO_GRAVITY, &tmp, 0);
 				debugprintf("\n\r KEY : 무중력버튼 -> 무중력");
 			} else {
 				esp32_packet_send(CMD1_SEND_RUN_ST, CMD2_FLAT, &tmp, 0);
 				debugprintf("\n\r KEY : 무중력버튼 -> 플랫");
 			}
 			gravity_flat_toggle = !gravity_flat_toggle;
-			remocon_key.key_val = INIT_KEY;
+			remocon_key.key_val = GRAVITY_KEY;
 			return;
 		}
 	}

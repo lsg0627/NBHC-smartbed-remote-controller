@@ -31,62 +31,78 @@
 //#define CMD_SEND_	0x50	// BED에서 보낸 정보
 
 // -------- ACT COMMAND ---------
-// 교대부양
-#define CMD2_VENTIL_NORMAL	0x10	// 교대부양 일반
-#define CMD2_VENTIL_FOCUR	0x11		// 교대부양 집중
-#define CMD2_VENTIL_SLEEP	0x12		// 교대부양 수면
+// 카테고리별 nibble 배정: 1=체압분산, 2=교대부양, 3=마사지, 4=돌봄, 5=자세제어,
+//                          6=무중력, 7=온열, 8=볼륨, 9=동작제어, A=전원, B=낙상/시스템
 
-#define CMD2_PWR_ON	0x80	// POWER ON
-#define CMD2_PWR_OFF 0x81	// POWER OFF
-#define CMD2_INIT	0xFF	// 초기화 confirm(처음 키에 입력시)
-#define CMD2_STDBY	0xF0	// 초기화 실시
-#define CMD2_GET_BED_STATUS	0xF1	// 침대 상태 즉시 요청 (부팅 시, Master v3.2.5+)
+// [1] 체압분산
+#define CMD2_DISPERSION		0x10	// 체압분산
 
-#define CMD2_DISPERSION	0x20	// 체압분산
+// [2] 교대부양
+#define CMD2_VENTIL_STD		0x20	// 교대부양 일반 (구 CMD2_VENTIL_NORMAL)
+#define CMD2_VENTIL_FOCUS	0x21	// 교대부양 집중 (구 CMD2_VENTIL_FOCUR)
+#define CMD2_VENTIL_SLEEP	0x22	// 교대부양 수면
 
-#define CMD2_PAUSE		0x70	// 일시정지
-#define CMD2_RESTART	0x71	// 재동작
+// [3] 마사지 (0x30~0x37: 8종. CMD2_MASSAGE + offset 방식)
+#define CMD2_MASSAGE		0x30	// massage 1
 
-#define CMD2_MASSAGE	0x31	// massage 1
+// [4] 돌봄
+#define CMD2_READY_TILT		0x40	// 틸팅 준비 (구 CMD2_TILT_CARE)
+#define CMD2_UP_LEFT_TILT	0x41	// 좌틸팅 상승 (구 CMD2_MOVE_LEFT)
+#define CMD2_UP_RIGHT_TILT	0x42	// 우틸팅 상승 (구 CMD2_MOVE_RIGHT)
+#define CMD2_PAUSE_TILT		0x43	// 틸트 정지 (구 CMD2_MOVE_CENTER)
+#define CMD2_DOWN_LEFT_TILT	0x44	// 좌틸팅 하강 (구 CMD2_MOVE_LEFT_DOWN)
+#define CMD2_DOWN_RIGHT_TILT 0x45	// 우틸팅 하강 (구 CMD2_MOVE_RIGHT_DOWN)
+#define CMD2_MEAL			0x46	// 식사 모드
+#define CMD2_TRENDELENBUG	0x47	// 거꾸리 (구 CMD2_TREND)
+#define CMD2_HEAR			0x48	// 머리감기 (하위호환용)
+#define CMD2_BOWEL			0x49	// 배변 (구 CMD2_CATHARSIS)
 
-#define CMD2_HEAR		0x40	// 머리감기 (돌봄 화면에서 미사용, 하위호환용)
-#define CMD2_CATHARSIS	0x41	// 배변 (사용 안 함)
-#define CMD2_MOVE_LEFT	0X42	// 좌측 바 올림 (틸팅 조그 UP, 좌 선택)
-#define CMD2_MOVE_RIGHT	0x43 // 우측 바 올림 (틸팅 조그 UP, 우 선택)
-#define CMD2_MOVE_CENTER	0x44	// 틸트 정지 (제자리)
-#define CMD2_MOVE_LEFT_DOWN		0x57	// 좌측 바 내림 (틸팅 조그 DOWN, 좌 선택)
-#define CMD2_MOVE_RIGHT_DOWN	0x58	// 우측 바 내림 (틸팅 조그 DOWN, 우 선택)
-#define CMD2_TILT_CARE	0x4E	// 틸팅 케어 (수동 좌우 틸트)
-#define CMD2_TREND		0x4F	// 트렌델렌버그 (돌봄 전용, 마사지 재사용 아님)
-#define CMD2_TILT_READY	0xF2	// (수신 전용) ESP32 tilt_care[] 완료 통지 → 리모컨 UI 좌/우 분할 활성화
-#define CMD2_MEAL		0x4B	// 식사 모드
+// [5] 자세제어 (등판/다리판/높이)
+#define CMD2_UP_POSTURE_BACK	0x50	// 등판 상승 (구 CMD2_POSTURE_BACK_UP)
+#define CMD2_PAUSE_POSTURE_BACK	0x51	// 등판 정지 (구 CMD2_POSTURE_BACK_STOP)
+#define CMD2_DOWN_POSTURE_BACK	0x52	// 등판 하강 (구 CMD2_POSTURE_BACK_DOWN)
+#define CMD2_UP_POSTURE_LEG		0x53	// 다리판 상승 (구 CMD2_POSTURE_LEG_UP)
+#define CMD2_PAUSE_POSTURE_LEG	0x54	// 다리판 정지 (구 CMD2_POSTURE_LEG_STOP)
+#define CMD2_DOWN_POSTURE_LEG	0x55	// 다리판 하강 (구 CMD2_POSTURE_LEG_DOWN)
+#define CMD2_UP_HEIGHT			0x56	// 높이 상승 (구 CMD2_HEIGHT_UP)
+#define CMD2_PAUSE_HEIGHT		0x57	// 높이 정지 (구 CMD2_HEIGHT_STOP)
+#define CMD2_DOWN_HEIGHT		0x58	// 높이 하강 (구 CMD2_HEIGHT_DOWN)
 
-#define CMD2_HEAT	0x50	// 온열 OFF
-#define CMD2_HEAT1	0x51
-#define CMD2_HEAT2	0x52
-#define CMD2_HEAT3	0x53
+// [6] 무중력
+#define CMD2_FLAT			0x60	// 플랫 (수평)
+#define CMD2_ZERO_GRAVITY	0x61	// 무중력 (구 CMD2_GRAVITY)
 
-#define CMD2_VOLUME	0xB0	// 볼륨 0 (음소거)
-#define CMD2_VOLUME1	0xB1	// 볼륨 25
-#define CMD2_VOLUME2	0xB2	// 볼륨 50
-#define CMD2_VOLUME3	0xB3	// 볼륨 100
+// [7] 온열
+#define CMD2_HEAT			0x70	// 온열 OFF
+#define CMD2_HEAT1			0x71
+#define CMD2_HEAT2			0x72
+#define CMD2_HEAT3			0x73
 
-// 자세제어 (등판/다리판 모터)
-#define CMD2_POSTURE_BACK_UP	0x45	// 등판 올림
-#define CMD2_POSTURE_BACK_DOWN	0x46	// 등판 내림
-#define CMD2_POSTURE_BACK_STOP	0x47	// 등판 정지
-#define CMD2_POSTURE_LEG_UP		0x48	// 다리판 올림
-#define CMD2_POSTURE_LEG_DOWN	0x49	// 다리판 내림
-#define CMD2_POSTURE_LEG_STOP	0x4A	// 다리판 정지
-#define CMD2_HEIGHT_UP			0x54	// 높이 올림 (모터 13+14)
-#define CMD2_HEIGHT_DOWN		0x55	// 높이 내림
-#define CMD2_HEIGHT_STOP		0x56	// 높이 정지
-#define CMD2_GRAVITY			0x4D	// 무중력 자세 프리셋 (메인보드가 등판+다리판 자동 이동)
-#define CMD2_FLAT				0x4C	// 수평(플랫) 복귀 프리셋 (등판+다리판 수평으로)
+// [8] 볼륨
+#define CMD2_VOLUME0		0x80	// 음소거 (구 CMD2_VOLUME)
+#define CMD2_VOLUME1		0x81	// Low
+#define CMD2_VOLUME2		0x82	// Mid
+#define CMD2_VOLUME3		0x83	// Max
 
-// 낙상 경고 (메인보드 → 리모컨)
-#define CMD2_FALL_ALERT		0xA0	// 낙상 경고 발생
-#define CMD2_FALL_CLEAR		0xA1	// 낙상 경고 해제
+// [9] 동작 제어
+#define CMD2_PAUSE			0x90	// 일시정지
+#define CMD2_RESTART		0x91	// 재동작
+
+// [A] 전원
+#define CMD2_PWR_ON			0xA0	// POWER ON
+#define CMD2_PWR_OFF		0xA1	// POWER OFF
+
+// [B] 낙상 경고 (메인보드 → 리모컨)
+#define CMD2_FALL_ALERT		0xB0	// 낙상 경고 발생
+#define CMD2_FALL_CLEAR		0xB1	// 낙상 경고 해제
+
+// [B] 시스템/초기화
+#define CMD2_STDBY			0xB2	// 초기화 실시 (구 0xF0)
+#define CMD2_GET_BED_STATUS	0xB3	// 침대 상태 즉시 요청 (구 0xF1)
+#define CMD2_TILT_READY		0xB4	// (수신 전용) ESP32 tilt_care[] 완료 통지 (구 0xF2)
+#define CMD2_INIT			0xB5	// 초기화 confirm (구 0xFF)
+#define CMD2_PRESENCE_OFF	0xB6	// 재실 감지 자동종료 OFF (설정화면 토글 → 메인보드)
+#define CMD2_PRESENCE_ON	0xB7	// 재실 감지 자동종료 ON
 
 // 낙상 감지 기능이 아직 동작하지 않아 경고 화면을 띄우지 않는다.
 // 기능이 살아나면 1로 바꾸면 된다 — 관련 로직(키 게이팅, 확인창 우선순위)은 그대로 남겨둠.
@@ -121,10 +137,19 @@ typedef struct {
 	U8 fall_state;         // [6] 낙상 (0=정상, 1=주의, 2=경고, 3=알람) — 리모컨 미사용 (MODE_FALL_ALERT로 관리)
 	U8 powered_on;         // [7] 전원 (0=OFF, 1=ON)
 	U8 startup_pending;    // [8] 0=정상, 1=사용자 확인 필요 (Master v3.2.4+). 확인창의 단일 진실 원천
-	U8 reserved;           // [9] 예약
+	U8 reserved;           // [9] 전시모드 플래그 (메인보드 EXHIBITION_MODE): 0=일반(집중/수면 표시), 1=전시(집중/수면 숨김)
+	U8 height_percent;     // [10] 높이 각도 (0~100%) — 자세제어 '높이' 탭 상/하한 화살표 숨김용 (NineBed 전용)
+	U8 zero_gravity;       // [11] 무중력 상태 (1=무중력 위치, 0=아님) — 우측 상단 표시용
+	U32 elapsed_sec;       // [12..15] 현재 모드(체압분산/교대부양) 경과 초 — 메인보드 계산값.
+	                       //      연결이 끊겼다 붙어도 메인보드 값을 그대로 표시하므로 초기화 안 됨.
+	// 주의: 이 구조체는 packed가 아니므로 끝에 U8을 더하면 U32 정렬 패딩으로 sizeof가
+	//       16→20으로 튀어 BedStatus 길이검사(dlen >= sizeof)가 깨진다. 그래서 [16]
+	//       presence_detect는 구조체에 넣지 않고 g_presence_detect 전역으로 따로 파싱한다.
 } BED_STATUS_DATA;
 
 extern BED_STATUS_DATA bed_status;  // 전역 상태 (protocol.c에서 갱신)
+extern U8 g_presence_detect;        // [16] 재실 감지 자동종료 설정 echo (0=OFF, 1=ON) — 메인보드 NVS값
+extern U8 g_bed_variant;            // [17] 베드 종류 (0=AnyBed, 1=NineBed). AnyBed면 자세제어 '높이' 탭 숨김
 
 #define CMD3_START		0x00
 #define CMD3_PAUSE	0x01

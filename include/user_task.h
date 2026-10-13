@@ -54,6 +54,7 @@ extern EGL_FONT* g_pFont28;
 extern EGL_FONT* g_pFont16;
 extern EGL_FONT* g_pFontKor;	// 한글 bitfont (28px)
 extern EGL_FONT* g_pFontKor16;	// 한글 bitfont (16px)
+extern EGL_FONT* g_pFontKor24;	// 한글 bitfont (24px) — 동작상태 텍스트용
 
 
 extern SMART_BED_DISP_STATUS smart_bed_display;
@@ -95,6 +96,11 @@ extern SURFACE *levitate_sleep_sel_icon_img;
 extern SURFACE *massage_title_img;
 extern SURFACE *massage_main_icon_img;
 extern SURFACE *massage_sub_icon_img[12];
+
+extern SURFACE *ulcer_tag_img;	// 욕창케어 하단 "욕창케어" 태그 이미지 (없으면 NULL)
+extern SURFACE *confirm_btn_img;	// 욕창케어 하단 "시작"용 확인버튼 이미지 (없으면 NULL)
+extern SURFACE *person_img;			// 체압 그리드 위 사람 실루엣(외곽선) 이미지 (없으면 NULL)
+extern SURFACE *massage_tag_img, *care_tag_img, *posture_tag_img, *set_tag_img;	// 하단 화면명 태그
 
 // 환자 케어
 extern SURFACE *patient_title_img;
@@ -196,6 +202,11 @@ extern U32 auto_home_timer;		// 10ms 틱 카운트다운 (50 = 5초)
 // 모드명 마퀴 스크롤 (좌측 헤더 박스에서 긴 모드명을 흘려 보여줌)
 extern U32 mode_text_offset;	// 현재 스크롤 오프셋 (px)
 
+// 돌봄(케어) 모드 실행 중 무중력/자세제어 차단
+extern U32 care_block_msg_remain;	// 안내 메시지 잔여 틱(100ms). >0면 오버레이 표시.
+bool is_care_mode_running(void);	// 돌봄 모드 동작 중 여부
+void draw_care_block_message(void);	// 차단 안내 메시지 오버레이 (smart_bed_remocon.c)
+
 // 로컬 상태 잠금 — 사용자 액션 후 ESP32 패킷이 current_mode/run_state를 덮어쓰지 못하게 함
 extern U32 bed_state_lock_remain;	// 100ms 틱 단위 (30 = 3초)
 
@@ -223,6 +234,7 @@ extern U32 pending_mode_start_timeout;
 extern bool init_home_pending;
 extern U32 init_home_pending_timeout;
 extern U8 init_home_state1_count;	// 이번 init 사이클 동안 관측한 state=1 packet 개수
+extern bool mode_switch_from_running;	// 모드→모드 전환(직전 모드 동작 중) 여부
 
 // 리모컨 전원 ON 후 첫 BED_STATUS로 침대 상태 확인 후 PWR_ON 조건부 송신
 extern bool pending_pwr_on_check;
@@ -231,7 +243,7 @@ extern U32 pending_pwr_on_check_timeout;
 // 마사지 모드 사이클 타이머
 extern U32 massage_timer_elapsed_ms;
 extern U8 massage_timer_mode;
-extern const U32 massage_durations_ms[12];
+extern const U32 massage_durations_ms[8];
 
 // VAIRANCE/LEVITATE 모드 경과 시간 타이머
 extern U32 mode_timer_elapsed_ms;

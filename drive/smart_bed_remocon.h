@@ -56,8 +56,8 @@ enum _body_dispersion
 };
 
 #define	BODY_MASS_MAX 2
-#define MASSAGE_MAX	12		// ESP32 CMD 코드 범위 (0x31~0x3C)
-#define MASSAGE_UI_MAX	8		// 리모컨 UI에 표시할 마사지 개수 (집중/트렌델/무중력/트위스트 삭제)
+#define MASSAGE_MAX	8		// ESP32 CMD 코드 범위 (0x31~0x38, 재번호매김)
+#define MASSAGE_UI_MAX	7		// 리모컨 UI 표시 마사지 개수 (트위스트=0x38은 UI 미노출)
 extern U8 body_set_max[BODY_LEVIT_MAX];
 
 enum{

@@ -20,6 +20,7 @@ EGL_FONT* g_pFont28;
 EGL_FONT* g_pFont16;
 EGL_FONT* g_pFontKor = NULL;
 EGL_FONT* g_pFontKor16 = NULL;
+EGL_FONT* g_pFontKor24 = NULL;	// 동작상태 텍스트용(28보다 조금 작게)
 
 // 전원 ON 직후 로딩 화면 (boot.suf) 표시 — PDF 슬라이드 3 → 4 전환
 // (process_target_time_handler / home_draw / remocon_power_ctrl 모두 참조)
@@ -57,6 +58,10 @@ U32 pending_mode_start_timeout = 0;	// 100ms 틱 단위
 bool init_home_pending = false;
 U32 init_home_pending_timeout = 0;	// 100ms 틱 단위 (600 = 60초)
 U8 init_home_state1_count = 0;		// 이번 사이클의 state=1 packet 개수 (2번째에 clear)
+// 모드→모드 전환 여부: 직전에 다른 모드가 동작 중이었으면 true (CONFORM 시작 시점 세팅).
+//   전환 홈(init_home_pending) 동안 "종료중" 표시 + 경과시간은 홈 완료 후부터 카운트.
+//   대기(건반 홈 완료)에서 시작하면 false → 즉시 모드명/카운트.
+bool mode_switch_from_running = false;
 
 // 리모컨 전원 ON 직후 → 첫 BED_STATUS로 침대 상태 확인 후 CMD2_PWR_ON 송신 여부 결정
 // idle(state=0)이면 CMD2_PWR_ON 송신 (ESP32에서 1.mp3 + 홈 복귀 루틴 수행)
@@ -83,6 +88,9 @@ U8   boot_status_retry = 3;
 U32  boot_status_wait = 0;
 bool master_booted = false;	// 마스터의 첫 BedStatus를 실제로 수신했는지 (부팅 완료 판정)
 							// boot_status_done은 fallback(~600ms)으로도 켜지므로 구분 불가 → 별도 플래그
+// [스피너 최초 부팅만] 최초 전원 켤 때의 홈(state=3) 스피너 완료 후 latch.
+//   이후 모드 종료 홈(state=3)에서는 스피너를 띄우지 않기 위함. 전원 켤 때 false로 리셋.
+bool boot_home_done = false;
 
 // --- 통신 끊김 감지 (§7) ---
 U32  bed_status_silence = 0;
@@ -100,20 +108,17 @@ U8 massage_timer_mode = 0xFF;		// 0~11: 마사지 인덱스, 0xFF: 비활성
 U32 mode_timer_elapsed_ms = 0;
 U8  mode_timer_mode = 0;	// 현재 추적 중인 mode 코드 (0 = 비활성)
 
-// 1회 사이클 시간 (ms) — 실측치
-const U32 massage_durations_ms[12] = {
-	779000,	// 0: 파도타기 (12:59)
-	766572,	// 1: 지압 (12:46)
-	991288,	// 2: 집중 (16:31)
-	1129528,	// 3: 추나 (18:49)
-	717511,	// 4: 스트레칭 (11:57)
-	675432,	// 5: 트위스트 (11:15)
-	336304,	// 6: 트렌델렌버그 (5:36)
-	1093265,	// 7: 롤링 (18:13)
-	488301,	// 8: 호흡 (8:08)
-	1014757,	// 9: 시소 (16:54)
-	421573,	// 10: 무중력 (7:01)
-	565385,	// 11: 수면 (9:25)
+// 1회 사이클 시간 (ms) — 실측치. 인덱스 = CMD offset (0x30~0x37 = 0~7)
+// 집중/거꾸리/무중력/호흡 삭제 + 재번호매김에 맞춰 재정렬됨.
+const U32 massage_durations_ms[8] = {
+	779000,		// 0: 파도타기 (12:59, CMD 0x30)
+	766572,		// 1: 지압 (12:46, CMD 0x31)
+	1129528,	// 2: 추나 (18:49, CMD 0x32)
+	717511,		// 3: 스트레칭 (11:57, CMD 0x33)
+	1093265,	// 4: 롤링 (18:13, CMD 0x34)
+	1014757,	// 5: 시소 (16:54, CMD 0x35)
+	565385,		// 6: 수면 (9:25, CMD 0x36)
+	675432,		// 7: 트위스트 (11:15, CMD 0x37, UI 미노출)
 };
 
 // 모드명 마퀴 스크롤 상태 (홈 화면 좌측 박스, 동작 중 모드명이 길 때)
@@ -125,6 +130,17 @@ U8  mode_text_last_state = 0xFF;	// 상태 변경 감지용 (동작중/일시정
 bool mode_text_last_stdby = false;	// stdby_in_progress 변경 감지용
 bool mode_text_last_external_stopping = false;	// external_stopping 변경 감지용
 bool mode_text_scrolling = false;	// 스크롤 필요 여부
+
+// 돌봄(케어) 모드 실행 중 무중력/자세제어 차단 안내 메시지 잔여 틱(100ms 단위). >0면 오버레이 표시.
+U32 care_block_msg_remain = 0;
+
+// 돌봄(케어) 모드 실행 중 여부 — 무중력/자세제어 차단용.
+//   케어 액션 코드(0x40~0x49: 틸팅/식사/거꾸리/머리감기/배변) + 정지 아님(run_state!=0).
+bool is_care_mode_running(void)
+{
+	U8 m = bed_status.current_mode;
+	return (bed_status.run_state != 0) && (m >= 0x40 && m <= 0x49);
+}
 
 // 모드명 텍스트 폭 계산.
 // - Pretendard bmpfont: EGL API로 실제 폰트 metric (프로포셔널 대응)
@@ -228,7 +244,49 @@ void process_target_time_handler(void){
 		// pDC->target_time.tmout_10msec= *((volatile unsigned int*)TMCNT_ADDR(SYS_TIMER_CH));// get timer count
 		// progress_10ms_condition();
 	// }
-	
+
+	// [마사지 전환 슬라이드] 선택↔설정 전환(측면매트리스 상승/하강 + 설정 등장)을 부드럽게.
+	//   100ms 게이트 밖에서 ~20ms마다 작은 스텝으로 진행 → 리드로우 30ms캡과 맞물려 ~33fps.
+	//   올라갈 때(→100)·내려갈 때(→0) 모두 동일 경로. 전환 중일 때만 display_refresh 요청.
+	{
+		extern int massage_config_mode, massage_config_anim, massage_wave_frame;
+		static U16 cfg_anim_cnt = 0;
+		if(smart_bed_status.status == MODE_MASSAGE){
+			if(time_10msec_interval_get(cfg_anim_cnt) >= 2){	// ~20ms 주기
+				int target = massage_config_mode ? 100 : 0;
+				cfg_anim_cnt = *((volatile unsigned int*)TMCNT_ADDR(SYS_TIMER_CH));
+				massage_wave_frame++;		// 파도타기 웨이브(부드러운 보간)
+				if(massage_config_anim < target){
+					massage_config_anim += 14;	// 전환 빠르게 (0→100 약 150ms)
+					if(massage_config_anim > 100) massage_config_anim = 100;
+				} else if(massage_config_anim > target){
+					massage_config_anim -= 14;
+					if(massage_config_anim < 0) massage_config_anim = 0;
+				}
+				smart_bed_display.display_refresh = true;
+			}
+		} else if(massage_config_anim != 0){
+			massage_config_anim = 0;	// 마사지 화면 이탈 시 리셋
+		}
+	}
+
+	// 욕창 사용자맞춤 설정창 전환 — 마사지 config와 동일(+=14/20ms, 바디 영역만)
+	{
+		extern int ulcer_config_mode, ulcer_config_anim;
+		static U16 ulc_cnt = 0;
+		if(smart_bed_status.status == MODE_ULCER_CARE){
+			int target = ulcer_config_mode ? 100 : 0;
+			if(ulcer_config_anim != target && time_10msec_interval_get(ulc_cnt) >= 2){	// ~20ms
+				ulc_cnt = *((volatile unsigned int*)TMCNT_ADDR(SYS_TIMER_CH));
+				if(ulcer_config_anim < target){ ulcer_config_anim += 14; if(ulcer_config_anim > 100) ulcer_config_anim = 100; }
+				else { ulcer_config_anim -= 14; if(ulcer_config_anim < 0) ulcer_config_anim = 0; }
+				smart_bed_display.display_refresh = true;
+			}
+		} else if(ulcer_config_anim != 0 || ulcer_config_mode != 0){
+			ulcer_config_anim = 0; ulcer_config_mode = 0;
+		}
+	}
+
 	if(time_10msec_interval_get(pDC->target_time.tmout_10msec) > 10){
 		pDC->target_time.tmout_10msec = *((volatile unsigned int*)TMCNT_ADDR(SYS_TIMER_CH));// get timer count
 		//progress_10ms_condition();
@@ -351,6 +409,16 @@ void process_target_time_handler(void){
 			}
 		}
 
+		// [스피너 최초 부팅만] 부팅 시퀀스(로딩·홈대기)가 끝나고 침대가 idle(mode0/state0)에
+		//   도달하면 latch. 이후 모드 종료 홈(state=3)에선 스피너 미표시.
+		//   부팅 홈이 빠른 홈(state=3 생략)이어도 idle 도달로 확실히 latch. 전원 켜면 리셋.
+		if(power && master_booted && !awaiting_homing_start && !show_loading_screen && !boot_home_done &&
+		   ((bed_status.current_mode == 0 && bed_status.run_state == 0) ||							// 부팅 홈 완료(idle 도달)
+		    (bed_status.current_mode != 0 && (bed_status.run_state == 1 || bed_status.run_state == 2)))){	// 또는 모드 동작/일시정지 도달(빠른 모드 시작 대비)
+			boot_home_done = true;	// 이후 모드 종료 재홈(state=3)에선 스피너 미표시
+			smart_bed_display.display_refresh = true;
+		}
+
 		// pending_mode_start 카운트다운 — timeout(15초)까지 유지
 		// 자동 settle 감지(mode!=0 && state==1)는 제거 — 모드 시작 후 ESP32가
 		// 호밍(state=3)을 거칠 수 있으므로 state=1로 일찍 settle 처리하면
@@ -379,60 +447,60 @@ void process_target_time_handler(void){
 		//  - state=0/3 (정지/초기화), stdby_in_progress, 비-VAIRANCE/LEVITATE 모드:
 		//    → 즉시 00:00으로 리셋
 		{
-			static U8 prev_mode_for_etimer = 0;
-			static U8 prev_state_for_etimer = 0xFF;
+			static U8  s_etimer_mode  = 0;	// 현재 타이밍 중인 모드 (0=없음)
+			static int s_etimer_grace = 0;	// 비카운트 지속 틱 (순간 끊김/깜빡임 유예)
+			#define ETIMER_STOP_GRACE 50	// 5초(50×100ms) 이상 비카운트여야 실제 종료로 보고 리셋
 			U8 m = bed_status.current_mode;
 			U8 s = bed_status.run_state;
-			bool is_vair_or_levit = (m == 0x20 || m == 0x10 || m == 0x11 || m == 0x12);
-			// init_home_pending 활성 중엔 카운트 정지 (ESP32가 실제 홈 시퀀스 진행 중)
-			if(is_vair_or_levit && s == 1 && !stdby_in_progress && !init_home_pending) {
-				U32 prev_sec, new_sec;
-				// fresh_start: state 0/3(정지/초기화)에서 1로 전환 or 모드 변경 시에만 true.
-				// state 2(일시정지)에서 1로 전환(resume)은 fresh_start 아님 → 이어서 카운트.
-				bool fresh_start = (prev_state_for_etimer != 1 && prev_state_for_etimer != 2) ||
-					(prev_mode_for_etimer != m);
-				if(fresh_start || mode_timer_mode != m) {
+			// 경과시간 카운트 대상: 체압분산(0x10) + 교대부양 일반/집중/수면(0x20/0x21/0x22).
+			bool is_vair_or_levit = (m == CMD2_DISPERSION ||
+			                         m == CMD2_VENTIL_STD ||
+			                         m == CMD2_VENTIL_FOCUS ||
+			                         m == CMD2_VENTIL_SLEEP);
+			// 전환 홈(이전 모드 종료 + 재홈) 진행 중엔 카운트 정지.
+			bool in_transition_home = (init_home_pending && mode_switch_from_running);
+			bool counting_now = is_vair_or_levit && !stdby_in_progress && !external_stopping &&
+			                    !in_transition_home && (s == 1 || s == 3);
+
+			if(counting_now) {
+				// 새 모드(또는 대기→시작)면 0부터. 같은 모드면 이어서 누적.
+				if(s_etimer_mode != m) {
+					s_etimer_mode = m;
 					mode_timer_mode = m;
 					mode_timer_elapsed_ms = 0;
 				}
-				prev_sec = mode_timer_elapsed_ms / 1000;
+				s_etimer_grace = 0;
+				U32 prev_sec = mode_timer_elapsed_ms / 1000;
 				mode_timer_elapsed_ms += 100;
-				new_sec = mode_timer_elapsed_ms / 1000;
-				if(new_sec != prev_sec) {
+				if(mode_timer_elapsed_ms / 1000 != prev_sec)
 					smart_bed_display.display_refresh = true;
-				}
-			} else if(is_vair_or_levit && s == 2) {
-				// 일시정지 — 값 유지 (재시작 시 이어서 카운트)
-			} else {
-				// 종료(state=0) / 초기화(state=3) / stdby / 다른 모드 → 00:00 리셋
-				if(mode_timer_mode != 0 || mode_timer_elapsed_ms != 0) {
+			} else if(is_vair_or_levit && s == 2 && s_etimer_mode == m) {
+				// 일시정지 — 값 유지(정상 상태) → 유예 리셋
+				s_etimer_grace = 0;
+			} else if(s_etimer_mode != 0) {
+				// 비카운트 — [순간 끊김/화면 깜빡임 보호] 유예 동안 값 유지(리셋 안 함).
+				//   리모컨 연결이 잠깐 끊기거나 화면이 깜빡여 bed_status가 순간 비정상값이 돼도
+				//   경과시간이 0으로 초기화되지 않고, 복구되면 이어서 카운트된다.
+				//   유예(5초) 넘게 지속되면 실제 종료/모드변경으로 보고 00:00 리셋.
+				if(++s_etimer_grace >= ETIMER_STOP_GRACE) {
+					s_etimer_mode = 0;
+					s_etimer_grace = 0;
 					mode_timer_mode = 0;
 					mode_timer_elapsed_ms = 0;
 					smart_bed_display.display_refresh = true;
 				}
 			}
-			prev_state_for_etimer = s;
-			prev_mode_for_etimer = m;
+			#undef ETIMER_STOP_GRACE
 		}
 
 		// 체압 매트리스는 ESP32 sensor_user_task가 항상 송신.
 		// 모드/종료/초기화 상태와 무관하게 리모컨은 받은 데이터를 그대로 표시.
 
-		// 마사지 화면 슬라이드 — 휠 회전 느낌
-		// 90px → 0, easing처럼 처음엔 빠르고 끝에 느려지는 효과
-		// (값이 클수록 큰 step, 작아질수록 작은 step)
+		// 마사지 화면: 측면매트리스 바 진동 프레임 진행(100ms 주기). 전환 슬라이드는 아래 20ms 블록에서.
 		{
-			extern int massage_anim_offset;
-			int abs_v = massage_anim_offset > 0 ? massage_anim_offset : -massage_anim_offset;
-			if(abs_v > 0) {
-				int step = abs_v / 3 + 2;	// easing: 30→12→6→4→2→0 같은 감속
-				if(massage_anim_offset > 0){
-					massage_anim_offset -= step;
-					if(massage_anim_offset < 0) massage_anim_offset = 0;
-				} else {
-					massage_anim_offset += step;
-					if(massage_anim_offset > 0) massage_anim_offset = 0;
-				}
+			extern int massage_anim_frame;
+			if(smart_bed_status.status == MODE_MASSAGE){
+				massage_anim_frame++;
 				smart_bed_display.display_refresh = true;
 			}
 		}
@@ -457,6 +525,14 @@ void process_target_time_handler(void){
 			}
 		}
 
+		// 돌봄 차단 안내 메시지 카운트다운 — 만료(0) 시에만 화면을 다시 그려 메시지 제거.
+		//   (매 틱 재그리기하면 전체 화면이 깜빡이므로, 표시는 트리거 시 1회 그린 뒤 유지)
+		if(care_block_msg_remain > 0){
+			care_block_msg_remain--;
+			if(care_block_msg_remain == 0)
+				smart_bed_display.display_refresh = true;	// 만료 → 화면 복원(메시지 제거)
+		}
+
 		// 모드명/상태 마퀴 스크롤 — status 박스를 가진 화면에서 텍스트가 박스를 초과할 때 스크롤
 		// 동작중 / 일시정지 / 종료중 / 초기화중(stdby) 모두 처리
 		// HOME 외에 VAIRANCE/LEVITATE/MASSAGE/CARE 화면도 동일 박스를 가지므로 스크롤 유지
@@ -465,7 +541,10 @@ void process_target_time_handler(void){
 		    smart_bed_status.status == MODE_VAIRANCE ||
 		    smart_bed_status.status == MODE_LEVITATE ||
 		    smart_bed_status.status == MODE_MASSAGE ||
-		    smart_bed_status.status == MODE_PATIENT_CARE)) {
+		    smart_bed_status.status == MODE_PATIENT_CARE ||
+		    smart_bed_status.status == MODE_ULCER_CARE ||	// 욕창케어
+		    smart_bed_status.status == MODE_POSTURE ||		// 자세제어
+		    smart_bed_status.status == MODE_SET_SAVE)) {	// 설정
 			// 모드/상태/stdby 변경 감지 → 폭 재계산 + 스크롤 리셋
 			if(mode_text_last_mode != bed_status.current_mode ||
 			   mode_text_last_state != bed_status.run_state ||
@@ -483,13 +562,13 @@ void process_target_time_handler(void){
 					get_mode_status_text(bed_status.current_mode, bed_status.run_state));
 				mode_text_offset = 0;
 				mode_text_pause = 0;
-				// 텍스트 영역(x=32~140, 폭 108)보다 길면 스크롤
-				mode_text_scrolling = (mode_text_width > 108);
+				// 텍스트 영역(아이콘 뒤 x=34~154, 폭 ~120)보다 길면 스크롤
+				mode_text_scrolling = (mode_text_width > 118);
 				smart_bed_display.display_refresh = true;	// 텍스트 변경 → 재그리기
 			}
 			// 스크롤 진행
 			if(mode_text_scrolling) {
-				U32 target = (mode_text_width > 108) ? (mode_text_width - 108 + 4) : 0;
+				U32 target = (mode_text_width > 118) ? (mode_text_width - 118 + 4) : 0;
 				if(mode_text_pause > 0) {
 					mode_text_pause--;
 					if(mode_text_pause == 0) {
@@ -576,6 +655,15 @@ SURFACE *levitate_sleep_sel_icon_img;
 SURFACE *massage_title_img;
 SURFACE *massage_main_icon_img;
 SURFACE *massage_sub_icon_img[12];
+
+// 욕창케어 하단 "욕창케어" 태그 이미지 (image/rc_title_bar_ulcer.suf) — 파일 없으면 NULL.
+SURFACE *ulcer_tag_img;
+// 욕창케어 하단 "시작"용 확인버튼 이미지 (image/rc_confirm_btn.suf) — 파일 없으면 NULL.
+SURFACE *confirm_btn_img;
+// 체압 그리드 위 사람 실루엣(외곽선) 이미지 (image/person.suf) — 파일 없으면 NULL.
+SURFACE *person_img;
+// 각 화면 하단 "홈으로" 옆 화면명 태그 이미지 — 파일 없으면 NULL.
+SURFACE *massage_tag_img, *care_tag_img, *posture_tag_img, *set_tag_img;
 
 // 환자 케어
 SURFACE *patient_title_img;
@@ -677,6 +765,15 @@ void image_load(void){
 	for(i = 0; i<12; i++)
 		massage_sub_icon_img[i] = loadsurf((char*)massage_file_list[i]);// 리듬타입
 	
+	// 욕창케어 하단 "욕창케어" 태그 이미지 — 파일 있으면 로드, 없으면 NULL(→ 드로잉 태그로 대체).
+	ulcer_tag_img = loadsurf("image/rc_title_bar_ulcer.suf");
+	confirm_btn_img = loadsurf("image/rc_confirm_btn.suf");	// "시작"용 확인버튼 이미지
+	person_img = loadsurf("image/person.suf");				// 체압 그리드 위 사람 실루엣(외곽선)
+	massage_tag_img = loadsurf("image/rc_tag_massage.suf");	// 하단 홈으로 옆 화면명 태그
+	care_tag_img    = loadsurf("image/rc_tag_care.suf");
+	posture_tag_img = loadsurf("image/rc_tag_posture.suf");
+	set_tag_img     = loadsurf("image/rc_tag_set.suf");
+
 	// 환자케어
 	patient_title_img = loadsurf("image/rc_title_bar_care.suf");
 	patient_main_icon_img = loadsurf("image/main_icon_care.suf");
@@ -740,6 +837,7 @@ void load_font(void){
 	// 한글 포인터: 같은 .fnt를 재사용 (중복 로드 방지 위해 포인터 공유)
 	g_pFontKor   = g_pFont28;
 	g_pFontKor16 = g_pFont16;
+	g_pFontKor24 = g_pFont28;	// Pretendard 경로엔 24px 없음 → 28로 대체(플래그=0이라 미사용)
 #else
 	// [Fallback] 기존 폰트 (Pretendard .fnt 미준비 시)
 	g_pFont28 = create_bmpfont("image/font/font28.fnt");
@@ -757,6 +855,9 @@ void load_font(void){
 
 	g_pFontKor16 = create_bitfont();
 	set_bitfontsize(g_pFontKor16, 8, 16, 16, 16);	// 영문8x16, 한글16x16
+
+	g_pFontKor24 = create_bitfont();
+	set_bitfontsize(g_pFontKor24, 12, 24, 24, 24);	// 영문12x24, 한글24x24 (동작상태용)
 #endif
 }
 
@@ -785,6 +886,11 @@ void home_proc(void)
 	switch(remocon_key.key_val){
 		case CONFORM_KEY:
 			// 오버레이 화면에서 확인 버튼 → 동작중↔일시정지 토글
+			// [예외] 돌봄(케어) 모드 동작 중엔 일시정지 없이 계속 동작 → CONFORM 무시(아무 변화 없음).
+			if(is_care_mode_running()) {
+				remocon_key.key_val = 0xFF;
+				break;
+			}
 			if(bed_status.run_state == 1) {
 				// 동작 중 → 일시정지
 				U8 tmp = CMD3_PAUSE;
@@ -878,6 +984,7 @@ void remocon_power_ctrl(U8 remo_pwr)
 			remo_pwr_st = REMO_LCD_ON;
 			stdby_in_progress = false;
 			power_off_pending = false;
+			boot_home_done = false;	// 전원 ON → 최초 부팅 홈 스피너 다시 허용
 
 			// startup_pending=1이면 Master가 InitializeAction 외 모든 명령을 거부한다.
 			// CMD2_PWR_ON을 보내봐야 무시당하고 5초 스피너 후 무반응이 된다 (spec §5.1).
@@ -947,6 +1054,7 @@ void remocon_boot_power_on(void)
 	stdby_in_progress = false;
 	power_off_pending = false;
 	awaiting_homing_start = false;
+	boot_home_done = false;	// 최초 부팅 홈 스피너 허용
 
 	// 스피너는 마스터 부팅 완료(첫 BedStatus 수신)까지 유지된다 — is_homing_active()의 !master_booted 조건.
 	// 부팅 완료 시 startup_pending=1이면 protocol.c가 확인창으로, idle이면 홈으로 전환한다.
@@ -1065,6 +1173,16 @@ void process_analy_data(){
 		return;
 	}
 
+	// [돌봄 보호] 어떤 경로로든 돌봄 모드 중 자세제어에 들어오면 즉시 HOME으로 되돌리고 안내.
+	if(smart_bed_status.status == MODE_POSTURE && is_care_mode_running()){
+		smart_bed_status.status = MODE_HOME;
+		smart_bed_display.status = MODE_HOME;
+		care_block_msg_remain = 30;	// 3초 안내
+		smart_bed_display.display_refresh = true;
+		remocon_key.key_val = 0xFF;
+		return;
+	}
+
 	switch(smart_bed_status.status){
 		case MODE_HOME:
 			home_proc();
@@ -1109,13 +1227,15 @@ bool is_homing_active(void)
 		!master_booted ||					// 마스터 부팅 완료(첫 BedStatus) 전까지 스피너 유지
 		show_loading_screen ||				// 수동 전원 ON 초기 로딩
 		awaiting_homing_start ||			// 전원 ON 후 state=3 도착 대기
-		(bed_status.current_mode == 0x00 && bed_status.run_state == 3));	// 홈 시퀀스 진행
+		// 홈 시퀀스(state=3) 스피너 — 최초 전원 부팅 홈에서만. 이후(모드 종료 홈 등)엔 미표시.
+		(!boot_home_done && bed_status.current_mode == 0x00 && bed_status.run_state == 3));
 }
 
 void progress_lcd_display(void){
 	// 통신 끊김 오버레이 (spec §7). 낙상 경고와 확인창이 우선.
 	// 원래 모드를 잃지 않도록 smart_bed_display.status를 건드리지 않는다.
 	static bool link_screen_shown = false;
+	static bool care_block_msg_shown = false;	// 돌봄 차단 메시지가 화면에 떠 있는지(재그리기 정지용)
 	if(power && link_lost &&
 	   smart_bed_status.status != MODE_FALL_ALERT && !startup_confirm_active){
 		if(!link_screen_shown){
@@ -1137,6 +1257,13 @@ void progress_lcd_display(void){
 		   smart_bed_status.status != MODE_FALL_ALERT &&
 		   smart_bed_status.status != MODE_STARTUP_CONFIRM){
 			homing_draw();
+			smart_bed_display.display_refresh = false;
+			return;
+		}
+		// 돌봄 차단 안내 메시지가 이미 화면에 떠 있으면(표시 중) 재그리기를 생략한다.
+		//   → 스크롤/상태갱신 등으로 display_refresh가 계속 떠도 화면을 다시 그리지 않아
+		//     메시지가 깜빡이지 않는다. 최초 1회만 아래에서 화면+메시지를 그리고 만료까지 정지.
+		if(care_block_msg_shown && care_block_msg_remain > 0){
 			smart_bed_display.display_refresh = false;
 			return;
 		}
@@ -1182,6 +1309,17 @@ void progress_lcd_display(void){
 				break;
 		}
 
+		// 돌봄 모드 중 무중력/자세제어 차단 안내 — 현재 화면 위에 덮어 그림.
+		//   (낙상 경고/부팅 확인창에서는 표시하지 않음: 안전 화면 우선)
+		if(care_block_msg_remain > 0 &&
+		   smart_bed_display.status != MODE_FALL_ALERT &&
+		   smart_bed_display.status != MODE_STARTUP_CONFIRM){
+			draw_care_block_message();	// front 프레임에 직접 합성 (flip 없음)
+			care_block_msg_shown = true;	// 이후 재그리기 생략 → 깜빡임 없음
+		} else {
+			care_block_msg_shown = false;
+		}
+
 		smart_bed_display.display_refresh = false;
 	}
 
@@ -1194,7 +1332,33 @@ void progress_lcd_display(void){
 //
 #include "fatfs/ff.h"
 
-static int screenshot_counter = 0;
+// -1 = 미초기화. 첫 호출 시 screenshot 폴더 스캔하여 max+1로 세팅
+// (부팅마다 리셋되면 SHOT_000.BMP를 덮어써 이전 스샷이 사라진다).
+static int screenshot_counter = -1;
+
+// screenshot 폴더에서 가장 큰 SHOT_NNN.BMP의 NNN+1 값을 반환.
+// 파일이 없으면 0.
+static int scan_screenshot_counter(void){
+	DIR dir;
+	FILINFO fno;
+	int max_n = -1;
+	int n, digits, i;
+
+	if(f_opendir(&dir, "0:/screenshot") != FR_OK) return 0;
+	while(f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != 0){
+		// "SHOT_NNN.BMP" 패턴 매칭
+		if(strncmp(fno.fname, "SHOT_", 5) != 0) continue;
+		n = 0;
+		digits = 0;
+		for(i = 5; i < 5 + 3 && fno.fname[i] >= '0' && fno.fname[i] <= '9'; i++){
+			n = n * 10 + (fno.fname[i] - '0');
+			digits++;
+		}
+		if(digits > 0 && n > max_n) max_n = n;
+	}
+	f_closedir(&dir);
+	return max_n + 1;
+}
 
 // RGB565 → 24-bit BMP 저장 (front frame 캡쳐)
 void save_screenshot(void){
@@ -1218,6 +1382,12 @@ void save_screenshot(void){
 
 	// screenshot 폴더 생성 (이미 있으면 무시)
 	f_mkdir("0:/screenshot");
+
+	// 첫 호출: 기존 파일 스캔하여 max+1로 세팅 (부팅 간 카운터 지속)
+	if(screenshot_counter < 0){
+		screenshot_counter = scan_screenshot_counter();
+		debugprintf("\n\r screenshot: counter init from disk = %d", screenshot_counter);
+	}
 
 	sprintf(path, "0:/screenshot/SHOT_%03d.BMP", screenshot_counter);
 	screenshot_counter = (screenshot_counter + 1) % 1000;
